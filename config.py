@@ -51,6 +51,7 @@ class KiteConfig:
     max_retries: int = 4
     retry_backoff_base_sec: float = 1.5   # exponential: base * 2^attempt
     retry_backoff_max_sec: float = 20.0
+    variety_regular: str = "regular"
 
     # WebSocket
     ws_reconnect_max_tries: int = 300      # effectively "forever, but capped"

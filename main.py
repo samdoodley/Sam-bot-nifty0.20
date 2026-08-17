@@ -1,13 +1,15 @@
 """
 main.py
 =======
-Live/Paper trading entry point.
+Paper trading entry point using real Kite live market data.
 
     NIFTY_BOT_MODE=PAPER python main.py
-    NIFTY_BOT_MODE=LIVE NIFTY_BOT_CONFIRM_LIVE=YES python main.py
 
-For backtesting, use backtest.py instead - it doesn't touch the broker
-at all and replays historical CSVs through the identical strategy code.
+This mode connects to Kite for live spot/option prices and historical
+data, but all orders are simulated locally (no real capital at risk).
+For backtesting, use backtest.py instead - it replays historical CSVs.
+For live trading with real money, use NIFTY_BOT_MODE=LIVE with
+NIFTY_BOT_CONFIRM_LIVE=YES.
 
 Self-healing:
   - Kite REST calls retry with backoff (kite_api.py).
@@ -29,6 +31,7 @@ import time as _time
 from datetime import datetime
 
 import dashboard
+import daily_report
 import indicators as ind
 from config import CONFIG, TradingMode
 from kite_api import KiteAPI
@@ -71,6 +74,7 @@ class TradingBot:
         self.spot_token: int | None = None
         self._latest_option_ltp: dict[str, float] = {}
         self._active_symbol: str | None = None
+        self._last_daily_report_date: str | None = None
 
     # ------------------------------------------------------------
     # STARTUP
@@ -78,6 +82,10 @@ class TradingBot:
 
     def start(self) -> None:
         _log.info("Starting NIFTY bot in %s mode.", CONFIG.mode.value)
+        if CONFIG.mode == TradingMode.PAPER:
+            _log.info("PAPER TRADING: Using REAL Kite live market data | Orders are SIMULATED (no real capital at risk)")
+        elif CONFIG.mode == TradingMode.LIVE:
+            _log.info("LIVE TRADING: Using REAL Kite live market data | Orders are REAL (real capital at risk)")
         self.kite.login()
 
         if CONFIG.mode == TradingMode.LIVE:
@@ -157,7 +165,15 @@ class TradingBot:
         self._shutdown_sequence()
 
     def _scan_iteration_guard(self, last_processed_bar_ts) -> None:
+        today_str = datetime.now().date().isoformat()
         if not is_market_open():
+            if self._last_daily_report_date != today_str:
+                try:
+                    daily_report.save_daily_report()
+                    self._last_daily_report_date = today_str
+                    _log.info("Daily report saved for %s", today_str)
+                except Exception:
+                    _log.exception("Failed to save daily report for %s", today_str)
             return
 
         closed_5m = self.candles.get_closed_candles(self.spot_token, CONFIG.session.primary_timeframe_min)
@@ -313,6 +329,11 @@ class TradingBot:
             self.kite.stop_ticker()
         except Exception:
             pass
+        try:
+            daily_report.save_daily_report()
+            _log.info("Final daily report saved on shutdown")
+        except Exception:
+            _log.exception("Failed to save daily report on shutdown")
         log_decision("BOT_SHUTDOWN", trades_today=self.risk.stats.trades_taken,
                      daily_pnl=round(self.risk.stats.realized_pnl, 2))
         sys.exit(0)

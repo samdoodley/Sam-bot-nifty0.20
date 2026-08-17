@@ -29,7 +29,8 @@ _state: dict[str, Any] = {
     "adx": None, "atr": None, "signal": None,
     "position": None, "entry_price": None, "current_pnl": None,
     "daily_pnl": None, "available_margin": None, "margin_used": None,
-    "trades_today": None, "win_rate": None, "mode": CONFIG.mode.value,
+    "trades_today": None, "win_rate": None,
+    "mode": "PAPER (Live Data)" if CONFIG.mode.value == "PAPER" else CONFIG.mode.value,
 }
 
 
@@ -54,7 +55,11 @@ td.label{color:#7fdc9a;width:220px;}
 .decisions{margin-top:24px;max-height:400px;overflow-y:auto;font-size:12px;white-space:pre-wrap;}
 </style></head>
 <body>
-<h1>NIFTY Weekly Options Bot [MODE: <span id="mode">-</span>]</h1>
+<h1>NIFTY Weekly Options Bot</h1>
+<h2 style="color:#7fdc9a;font-weight:normal;margin-top:4px;">
+  Mode: <span id="mode">-</span> &nbsp;|&nbsp;
+  Paper Trading with Real Kite Live Data
+</h2>
 <table id="state"></table>
 <h2>Recent Decisions</h2>
 <div class="decisions" id="decisions"></div>

@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+*.log
+*.jsonl
+reports/
+download_data.py
+run_*.py
+validate_*.py

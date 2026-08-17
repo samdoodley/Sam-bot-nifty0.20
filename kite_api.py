@@ -47,6 +47,9 @@ class KiteAPI:
         self._tick_callback: Optional[Callable] = None
         self._ws_lock = threading.Lock()
         self._ws_connected = threading.Event()
+        self._paper_mode = CONFIG.mode.value == "PAPER"
+        self._paper_orders: dict[str, dict] = {}
+        self._paper_positions: dict[str, int] = {}
 
     # ------------------------------------------------------------
     # AUTH
@@ -57,6 +60,7 @@ class KiteAPI:
         Loads a cached access token if it's still valid; otherwise
         performs a full browser-based Kite login and caches the new token.
         """
+        _log.info("MODE=%s | DATA=Real Kite Live | ORDERS=%s", CONFIG.mode.value, "SIMULATED (Paper)" if self._paper_mode else "REAL (Broker)")
         cached = self._load_cached_token()
         if cached:
             self.kite.set_access_token(cached)
@@ -198,26 +202,89 @@ class KiteAPI:
 
     @retry_with_backoff(exceptions=(Exception,))
     def place_order(self, **kwargs) -> str:
+        if self._paper_mode:
+            order_id = "PAPER_" + str(abs(hash(str(kwargs) + str(datetime.now()))))
+            tradingsymbol = kwargs.get("tradingsymbol", "UNKNOWN")
+            quantity = int(kwargs.get("quantity", 0))
+            transaction_type = kwargs.get("transaction_type", "BUY")
+            order_type = kwargs.get("order_type", "LIMIT")
+            price = float(kwargs.get("price", 0.0) or 0.0)
+            
+            self._paper_orders[order_id] = {
+                "order_id": order_id,
+                "tradingsymbol": tradingsymbol,
+                "quantity": quantity,
+                "filled_quantity": 0,
+                "average_price": 0.0,
+                "status": "OPEN",
+                "transaction_type": transaction_type,
+                "order_type": order_type,
+                "price": price,
+                "placed_at": datetime.now().isoformat(),
+            }
+            
+            if order_type == "LIMIT":
+                self._paper_orders[order_id]["status"] = "COMPLETE"
+                self._paper_orders[order_id]["filled_quantity"] = quantity
+                self._paper_orders[order_id]["average_price"] = price
+                if transaction_type == "BUY":
+                    self._paper_positions[tradingsymbol] = self._paper_positions.get(tradingsymbol, 0) + quantity
+                else:
+                    self._paper_positions[tradingsymbol] = self._paper_positions.get(tradingsymbol, 0) - quantity
+            elif order_type == "SL":
+                self._paper_orders[order_id]["status"] = "TRIGGER PENDING"
+                self._paper_orders[order_id]["filled_quantity"] = 0
+            
+            _log.info("PAPER mode: simulated order placed. order_id=%s type=%s symbol=%s qty=%s price=%.2f", order_id, order_type, tradingsymbol, quantity, price)
+            return order_id
         return self.kite.place_order(variety=kwargs.pop("variety", self.kite.VARIETY_REGULAR), **kwargs)
 
     @retry_with_backoff()
     def modify_order(self, variety: str, order_id: str, **kwargs) -> str:
+        if self._paper_mode:
+            if order_id in self._paper_orders:
+                order = self._paper_orders[order_id]
+                for key, value in kwargs.items():
+                    if key in ("price", "trigger_price"):
+                        order[key] = float(value) if value is not None else order.get(key, 0.0)
+                    else:
+                        order[key] = value
+                _log.info("PAPER mode: order modification simulated. order_id=%s new_trigger=%s new_limit=%s",
+                          order_id, order.get("trigger_price"), order.get("price"))
+            return order_id
         return self.kite.modify_order(variety=variety, order_id=order_id, **kwargs)
 
     @retry_with_backoff()
     def cancel_order(self, variety: str, order_id: str) -> str:
+        if self._paper_mode:
+            if order_id in self._paper_orders:
+                self._paper_orders[order_id]["status"] = "CANCELLED"
+            _log.info("PAPER mode: order cancellation simulated. order_id=%s", order_id)
+            return order_id
         return self.kite.cancel_order(variety=variety, order_id=order_id)
 
     @retry_with_backoff()
     def orders(self) -> list[dict]:
+        if self._paper_mode:
+            return list(self._paper_orders.values())
         return self.kite.orders()
 
     @retry_with_backoff()
     def order_history(self, order_id: str) -> list[dict]:
+        if self._paper_mode:
+            order = self._paper_orders.get(order_id)
+            if not order:
+                return []
+            return [dict(order)]
         return self.kite.order_history(order_id)
 
     @retry_with_backoff()
     def positions(self) -> dict:
+        if self._paper_mode:
+            net = []
+            for symbol, qty in self._paper_positions.items():
+                net.append({"tradingsymbol": symbol, "quantity": qty})
+            return {"net": net}
         return self.kite.positions()
 
     # ------------------------------------------------------------

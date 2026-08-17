@@ -114,6 +114,17 @@ TRAIL_TRIGGER_POINTS = 2.0
 TRAIL_INITIAL_RATIO = 8.0
 TRAIL_FINAL_RATIO = 5.0
 
+
+class PositionState(str, Enum):
+    ENTRY_REQUESTED = "ENTRY_REQUESTED"
+    ENTRY_PENDING = "ENTRY_PENDING"
+    ENTRY_FILLED = "ENTRY_FILLED"
+    ENTRY_FAILED = "ENTRY_FAILED"
+    OPEN = "OPEN"
+    EXIT_PENDING = "EXIT_PENDING"
+    CLOSED = "CLOSED"
+
+
 @dataclass
 class Candle:
     ts: datetime
@@ -164,4 +175,20 @@ class Position:
     breakeven_moved: bool = False
     highest_favorable_price: float = 0.0
     sl_order_id: Optional[str] = None
+    last_sl_trigger: float = 0.0
     entry_order_id: Optional[str] = None
+    entry_filled_quantity: int = 0
+    entry_avg_price: float = 0.0
+    entry_filled_at: Optional[str] = None
+    sl_placed_at: Optional[str] = None
+    state: PositionState = PositionState.OPEN
+    was_ever_filled: bool = False
+    exit_order_id: Optional[str] = None
+    exit_reason: str = ""
+    exit_requested_quantity: int = 0
+    exit_filled_quantity: int = 0
+    exit_remaining_quantity: int = 0
+    exit_avg_price: float = 0.0
+    exit_requested_at: Optional[str] = None
+    exit_filled_at: Optional[str] = None
+    last_reconciled_at: Optional[str] = None

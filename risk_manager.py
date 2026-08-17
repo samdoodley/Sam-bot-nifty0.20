@@ -61,7 +61,7 @@ class RiskManager:
         if pnl > 0:
             self.stats.wins += 1
             self.stats.consecutive_losses = 0
-        else:
+        elif pnl < 0:
             self.stats.losses += 1
             self.stats.consecutive_losses += 1
 
