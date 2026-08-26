@@ -120,8 +120,13 @@ class PositionState(str, Enum):
     ENTRY_PENDING = "ENTRY_PENDING"
     ENTRY_FILLED = "ENTRY_FILLED"
     ENTRY_FAILED = "ENTRY_FAILED"
+    ENTRY_CANCELLED_TIMEOUT = "ENTRY_CANCELLED_TIMEOUT"
     OPEN = "OPEN"
+    EXIT_LIMIT_PLACED = "EXIT_LIMIT_PLACED"
+    EXIT_LIMIT_PARTIAL = "EXIT_LIMIT_PARTIAL"
+    EXIT_MARKET_FALLBACK = "EXIT_MARKET_FALLBACK"
     EXIT_PENDING = "EXIT_PENDING"
+    EXIT_FAILED = "EXIT_FAILED"
     CLOSED = "CLOSED"
 
 
@@ -192,3 +197,7 @@ class Position:
     exit_requested_at: Optional[str] = None
     exit_filled_at: Optional[str] = None
     last_reconciled_at: Optional[str] = None
+    exit_limit_order_id: Optional[str] = None
+    exit_market_fallback_used: bool = False
+    exit_fallback_quantity: int = 0
+    entry_requested_at: Optional[str] = None

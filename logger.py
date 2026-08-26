@@ -16,6 +16,8 @@ import json
 import logging
 import logging.handlers
 import threading
+import urllib.request
+import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -95,3 +97,34 @@ def read_recent_decisions(n: int = 200) -> list[dict]:
         except json.JSONDecodeError:
             continue
     return out
+
+
+def log_structured(event: str, **fields: Any) -> None:
+    record = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "event": event,
+        "mode": CONFIG.mode.value,
+        **fields,
+    }
+    path = CONFIG.logging.log_dir / CONFIG.logging.decision_log_filename
+    line = json.dumps(record, default=str)
+    with _lock:
+        with open(path, "a") as f:
+            f.write(line + "\n")
+    op_logger = get_logger("decisions")
+    op_logger.info("%s | %s", event, {k: v for k, v in fields.items()})
+
+
+def send_telegram_alert(event: str, message: str) -> None:
+    if not CONFIG.alerting.enabled:
+        return
+    text = f"[NIFTY Bot] {event}: {message}"
+    url = f"https://api.telegram.org/bot{CONFIG.alerting.telegram_bot_token}/sendMessage"
+    payload = json.dumps({"chat_id": CONFIG.alerting.telegram_chat_id, "text": text}).encode("utf-8")
+    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            if resp.status != 200:
+                _log.warning("Telegram alert failed: HTTP %d", resp.status)
+    except Exception as exc:
+        _log.warning("Telegram alert failed: %s", exc)

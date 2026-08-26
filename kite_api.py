@@ -50,6 +50,9 @@ class KiteAPI:
         self._paper_mode = CONFIG.mode.value == "PAPER"
         self._paper_orders: dict[str, dict] = {}
         self._paper_positions: dict[str, int] = {}
+        self._paper_equity: float = 0.0
+        self._paper_initial_equity: float = 0.0
+        self._paper_fill_ratio: float = 1.0
 
     # ------------------------------------------------------------
     # AUTH
@@ -175,12 +178,177 @@ class KiteAPI:
         path.write_text(json.dumps(data, indent=2))
         _log.info("Token Saved")
 
+    def _simulate_fill(self, order: dict) -> tuple[int, float]:
+        order_type = order.get("order_type", "LIMIT")
+        requested = order.get("quantity", 0)
+        price = order.get("price", 0.0)
+        if requested <= 0:
+            return 0, 0.0
+        if order_type == "MARKET":
+            return requested, price if price > 0 else 0.0
+        if order_type == "SL":
+            return requested, price if price > 0 else 0.0
+        fill_ratio = getattr(self, "_paper_fill_ratio", 1.0)
+        if fill_ratio >= 1.0:
+            return requested, price
+        fill_qty = max(1, int(requested * fill_ratio))
+        return fill_qty, price
+
+    def _apply_fill_to_position(self, symbol: str, transaction_type: str, qty: int) -> None:
+        current = self._paper_positions.get(symbol, 0)
+        if transaction_type == "BUY":
+            self._paper_positions[symbol] = current + qty
+        else:
+            self._paper_positions[symbol] = current - qty
+
+    def process_paper_orders(self, symbol: str, ltp: float) -> None:
+        if not self._paper_mode:
+            return
+        for order_id, order in list(self._paper_orders.items()):
+            if order.get("tradingsymbol") != symbol:
+                continue
+            status = order.get("status", "")
+            if status in ("CANCELLED", "REJECTED"):
+                continue
+            order_type = order.get("order_type", "")
+            if order_type not in ("LIMIT", "MARKET"):
+                continue
+            txn = order.get("transaction_type", "BUY")
+            filled_qty = order.get("filled_quantity", 0)
+            if filled_qty > 0 and status == "COMPLETE":
+                current_qty = self._paper_positions.get(symbol, 0)
+                if txn == "SELL" and current_qty >= 0:
+                    self._cancel_opposite_protective_orders(symbol, "SELL")
+                elif txn == "BUY" and current_qty <= 0:
+                    self._cancel_opposite_protective_orders(symbol, "BUY")
+
+        for order_id, order in list(self._paper_orders.items()):
+            if order.get("tradingsymbol") != symbol:
+                continue
+            status = order.get("status", "")
+            if status in ("COMPLETE", "FILLED", "CANCELLED", "REJECTED"):
+                continue
+            order_type = order.get("order_type", "")
+            trigger = order.get("trigger_price", 0.0)
+            limit = order.get("price", 0.0)
+            requested = order.get("quantity", 0)
+            remaining = order.get("remaining_quantity", requested)
+            txn = order.get("transaction_type", "BUY")
+            if order_type == "SL" and status == "TRIGGER PENDING":
+                if (txn == "SELL" and ltp <= trigger) or (txn == "BUY" and ltp >= trigger):
+                    fill_qty, fill_price = self._simulate_fill(order)
+                    fill_qty = min(fill_qty, remaining)
+                    if fill_qty > 0:
+                        order["filled_quantity"] = order.get("filled_quantity", 0) + fill_qty
+                        order["remaining_quantity"] = remaining - fill_qty
+                        order["average_price"] = fill_price
+                        order["status"] = "COMPLETE" if order["remaining_quantity"] == 0 else "PARTIAL"
+                        self._apply_fill_to_position(symbol, txn, fill_qty)
+                        _log.info("PAPER SL filled: symbol=%s order_id=%s filled=%d remaining=%d price=%.2f", symbol, order_id, fill_qty, remaining - fill_qty, fill_price)
+                        self._cancel_opposite_protective_orders(symbol, txn)
+            elif order_type == "LIMIT" and status in ("OPEN", "PARTIAL"):
+                current_qty = self._paper_positions.get(symbol, 0)
+                if txn == "SELL" and current_qty > 0 and ltp <= limit:
+                    fill_qty, fill_price = self._simulate_fill(order)
+                    fill_qty = min(fill_qty, remaining, current_qty)
+                    if fill_qty > 0:
+                        order["filled_quantity"] = order.get("filled_quantity", 0) + fill_qty
+                        order["remaining_quantity"] = remaining - fill_qty
+                        order["average_price"] = fill_price
+                        order["status"] = "COMPLETE" if order["remaining_quantity"] == 0 else "PARTIAL"
+                        self._apply_fill_to_position(symbol, txn, fill_qty)
+                        _log.info("PAPER LIMIT exit filled: symbol=%s order_id=%s filled=%d remaining=%d price=%.2f", symbol, order_id, fill_qty, remaining - fill_qty, fill_price)
+                        self._cancel_opposite_protective_orders(symbol, txn)
+                elif txn == "BUY" and current_qty < 0 and ltp >= limit:
+                    fill_qty, fill_price = self._simulate_fill(order)
+                    fill_qty = min(fill_qty, remaining, abs(current_qty))
+                    if fill_qty > 0:
+                        order["filled_quantity"] = order.get("filled_quantity", 0) + fill_qty
+                        order["remaining_quantity"] = remaining - fill_qty
+                        order["average_price"] = fill_price
+                        order["status"] = "COMPLETE" if order["remaining_quantity"] == 0 else "PARTIAL"
+                        self._apply_fill_to_position(symbol, txn, fill_qty)
+                        _log.info("PAPER LIMIT exit filled: symbol=%s order_id=%s filled=%d remaining=%d price=%.2f", symbol, order_id, fill_qty, remaining - fill_qty, fill_price)
+                        self._cancel_opposite_protective_orders(symbol, txn)
+            elif order_type == "MARKET" and status in ("OPEN", "PARTIAL"):
+                fill_qty, fill_price = self._simulate_fill(order)
+                fill_qty = min(fill_qty, remaining)
+                if fill_qty > 0:
+                    order["filled_quantity"] = order.get("filled_quantity", 0) + fill_qty
+                    order["remaining_quantity"] = remaining - fill_qty
+                    order["average_price"] = fill_price
+                    order["status"] = "COMPLETE" if order["remaining_quantity"] == 0 else "PARTIAL"
+                    self._apply_fill_to_position(symbol, txn, fill_qty)
+                    _log.info("PAPER MARKET exit filled: symbol=%s order_id=%s filled=%d remaining=%d price=%.2f", symbol, order_id, fill_qty, remaining - fill_qty, fill_price)
+                    self._cancel_opposite_protective_orders(symbol, txn)
+
+    def _cancel_opposite_protective_orders(self, symbol: str, filled_txn: str) -> None:
+        opposite = "BUY" if filled_txn == "SELL" else "SELL"
+        for order_id, order in list(self._paper_orders.items()):
+            if order.get("tradingsymbol") != symbol:
+                continue
+            if order.get("transaction_type") == opposite and order.get("order_type") == "SL" and order.get("status") == "TRIGGER PENDING":
+                order["status"] = "CANCELLED"
+                _log.info("PAPER SL cancelled after exit fill: symbol=%s order_id=%s", symbol, order_id)
+
+    def fill_sl_order(self, symbol: str, fill_price: float) -> None:
+        if not self._paper_mode:
+            return
+        for order_id, order in list(self._paper_orders.items()):
+            if order.get("tradingsymbol") != symbol:
+                continue
+            if order.get("order_type") != "SL":
+                continue
+            status = order.get("status", "")
+            if status not in ("TRIGGER PENDING", "OPEN"):
+                continue
+            requested = order.get("quantity", 0)
+            remaining = order.get("remaining_quantity", requested)
+            txn = order.get("transaction_type", "BUY")
+            fill_qty, _ = self._simulate_fill(order)
+            fill_qty = min(fill_qty, remaining)
+            if fill_qty > 0:
+                order["filled_quantity"] = order.get("filled_quantity", 0) + fill_qty
+                order["remaining_quantity"] = remaining - fill_qty
+                order["average_price"] = fill_price
+                order["status"] = "COMPLETE" if order["remaining_quantity"] == 0 else "PARTIAL"
+                self._apply_fill_to_position(symbol, txn, fill_qty)
+                _log.info("PAPER SL force-filled: symbol=%s order_id=%s filled=%d remaining=%d price=%.2f", symbol, order_id, fill_qty, remaining - fill_qty, fill_price)
+
+    def _paper_margin_snapshot(self) -> dict:
+        return {
+            "paper_initial_equity": self._paper_initial_equity,
+            "paper_current_equity": self._paper_equity,
+            "paper_available_margin": self._paper_equity,
+        }
+
+    def set_paper_equity(self, equity: float) -> None:
+        self._paper_equity = float(equity)
+        if self._paper_initial_equity == 0.0:
+            self._paper_initial_equity = self._paper_equity
+
+    def set_paper_fill_ratio(self, ratio: float) -> None:
+        self._paper_fill_ratio = max(0.0, min(1.0, float(ratio)))
+
+    def credit_paper_pnl(self, pnl: float) -> None:
+        self._paper_equity += pnl
+
     # ------------------------------------------------------------
     # REST wrappers (retry-protected)
     # ------------------------------------------------------------
 
     @retry_with_backoff()
     def margins(self) -> dict:
+        if self._paper_mode:
+            return {
+                "equity": {
+                    "available": {
+                        "live_balance": self._paper_equity,
+                    }
+                },
+                "paper_equity": self._paper_equity,
+                "paper_initial_equity": self._paper_initial_equity,
+            }
         return self.kite.margins()
 
     @retry_with_backoff()
@@ -205,37 +373,51 @@ class KiteAPI:
         if self._paper_mode:
             order_id = "PAPER_" + str(abs(hash(str(kwargs) + str(datetime.now()))))
             tradingsymbol = kwargs.get("tradingsymbol", "UNKNOWN")
-            quantity = int(kwargs.get("quantity", 0))
+            requested_qty = int(kwargs.get("quantity", 0))
             transaction_type = kwargs.get("transaction_type", "BUY")
             order_type = kwargs.get("order_type", "LIMIT")
             price = float(kwargs.get("price", 0.0) or 0.0)
-            
-            self._paper_orders[order_id] = {
+            trigger_price = float(kwargs.get("trigger_price", 0.0) or 0.0)
+
+            order = {
                 "order_id": order_id,
                 "tradingsymbol": tradingsymbol,
-                "quantity": quantity,
+                "quantity": requested_qty,
                 "filled_quantity": 0,
+                "remaining_quantity": requested_qty,
                 "average_price": 0.0,
                 "status": "OPEN",
                 "transaction_type": transaction_type,
                 "order_type": order_type,
                 "price": price,
+                "trigger_price": trigger_price,
                 "placed_at": datetime.now().isoformat(),
             }
-            
-            if order_type == "LIMIT":
-                self._paper_orders[order_id]["status"] = "COMPLETE"
-                self._paper_orders[order_id]["filled_quantity"] = quantity
-                self._paper_orders[order_id]["average_price"] = price
-                if transaction_type == "BUY":
-                    self._paper_positions[tradingsymbol] = self._paper_positions.get(tradingsymbol, 0) + quantity
-                else:
-                    self._paper_positions[tradingsymbol] = self._paper_positions.get(tradingsymbol, 0) - quantity
-            elif order_type == "SL":
-                self._paper_orders[order_id]["status"] = "TRIGGER PENDING"
-                self._paper_orders[order_id]["filled_quantity"] = 0
-            
-            _log.info("PAPER mode: simulated order placed. order_id=%s type=%s symbol=%s qty=%s price=%.2f", order_id, order_type, tradingsymbol, quantity, price)
+            self._paper_orders[order_id] = order
+
+            if order_type == "SL":
+                order["status"] = "TRIGGER PENDING"
+                order["filled_quantity"] = 0
+                order["remaining_quantity"] = requested_qty
+            elif order_type == "MARKET":
+                fill_qty, fill_price = self._simulate_fill(order)
+                if fill_qty > 0:
+                    order["filled_quantity"] = fill_qty
+                    order["remaining_quantity"] = requested_qty - fill_qty
+                    order["average_price"] = fill_price
+                    order["status"] = "COMPLETE" if fill_qty >= requested_qty else "PARTIAL"
+                    self._apply_fill_to_position(tradingsymbol, transaction_type, fill_qty)
+            else:
+                fill_qty, fill_price = self._simulate_fill(order)
+                if fill_qty > 0:
+                    order["filled_quantity"] = fill_qty
+                    order["remaining_quantity"] = requested_qty - fill_qty
+                    order["average_price"] = fill_price
+                    order["status"] = "COMPLETE" if fill_qty >= requested_qty else "PARTIAL"
+                    self._apply_fill_to_position(tradingsymbol, transaction_type, fill_qty)
+
+            _log.info("PAPER mode: simulated order placed. order_id=%s type=%s symbol=%s requested=%d filled=%d remaining=%d price=%.2f status=%s",
+                      order_id, order_type, tradingsymbol, requested_qty, order["filled_quantity"], order["remaining_quantity"], price, order["status"])
             return order_id
         return self.kite.place_order(variety=kwargs.pop("variety", self.kite.VARIETY_REGULAR), **kwargs)
 

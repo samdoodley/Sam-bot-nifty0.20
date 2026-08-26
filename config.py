@@ -21,6 +21,10 @@ from enum import Enum
 from pathlib import Path
 from datetime import time
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 
 # ============================================================
 # MODE
@@ -38,8 +42,8 @@ class TradingMode(str, Enum):
 
 @dataclass(frozen=True)
 class KiteConfig:
-    api_key: str = os.getenv("KITE_API_KEY", "np7uml4ruym4cf6y")
-    api_secret: str = os.getenv("KITE_API_SECRET", "58g9z2nrdembv0v5092dknhokeyfef90")
+    api_key: str = os.getenv("KITE_API_KEY", "")
+    api_secret: str = os.getenv("KITE_API_SECRET", "")
     tokens_path: Path = Path.home() / ".nifty_bot" / "tokens.json"
     redirect_url: str = os.getenv("KITE_REDIRECT_URL", "http://127.0.0.1:8000")
     # TOTP-based auto login (mirrors your WickFill setup)
@@ -64,12 +68,15 @@ class KiteConfig:
 
 @dataclass(frozen=True)
 class CapitalConfig:
-    configured_capital: float = 3_00_000.0   # informational only; margin_manager
-                                              # always re-reads live broker margin
+    configured_capital: float = 3_00_000.0   # 3 lakh base capital
     product_type: str = "MIS"               # intraday only
     max_exposure_pct_of_margin: float = 0.90  # never use more than 90% of
                                                # available margin on one trade
     min_margin_buffer_rupees: float = 2_000.0  # always keep this much untouched
+    margin_leverage_multiplier: float = 1.0   # Zerodha intraday leverage factor;
+                                               # 1.0 = no extra leverage (option buying
+                                               # is usually cash-only), increase if your
+                                               # live margin exceeds your cash balance
 
 
 # ============================================================
@@ -100,6 +107,9 @@ class SessionConfig:
     last_entry_time: time = time(15, 15)     # allow entries until 15:15
     force_square_off_time: time = time(15, 15)
     market_close: time = time(15, 30)
+
+    enable_time_based_entry_gate: bool = False
+    first_entry_time: time = time(13, 10)
 
     primary_timeframe_min: int = 5
     higher_timeframe_min: int = 15
@@ -179,10 +189,14 @@ class TradeManagementConfig:
     premium_stop_loss_points: float = 12.0
 
     sl_order_type: str = "SL"                  # stop-limit, not SL-M (learned from
-                                                 # WickFill live-slippage experience)
+                                                  # WickFill live-slippage experience)
     sl_limit_offset_points: float = 1.0         # limit price = trigger +/- this
     sl_escalation_watchdog_sec: float = 5.0     # if SL-limit unfilled in this
-                                                 # window, fire market exit
+                                                  # window, fire market exit
+
+    exit_limit_buffer_pct: float = 0.02         # 2% aggressive buffer for LIMIT exit orders
+
+    profit_trail_pct: float = 0.7               # exit when profit reaches 70% of target distance
 
 
 # ============================================================
@@ -219,6 +233,8 @@ class OrderConfig:
     fill_confirmation_timeout_sec: float = 10.0
     max_order_retries: int = 3
     reject_retry_backoff_sec: float = 2.0
+    exit_limit_timeout_sec: float = 3.0
+    entry_fill_timeout_sec: float = 300.0
 
 
 # ============================================================
@@ -268,6 +284,55 @@ class BacktestConfig:
 
 
 # ============================================================
+# MARGIN SAFETY
+# ============================================================
+
+@dataclass(frozen=True)
+class MarginSafetyConfig:
+    margin_check_interval_sec: float = 10.0
+    min_available_margin: float = 0.0
+    min_available_margin_pct: float = 0.0
+    enable_market_exit_fallback: bool = True
+
+
+# ============================================================
+# ALERTING
+# ============================================================
+
+@dataclass(frozen=True)
+class AlertingConfig:
+    telegram_bot_token: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    telegram_chat_id: str = os.getenv("TELEGRAM_CHAT_ID", "")
+    enabled: bool = False
+
+    def __post_init__(self) -> None:
+        if self.telegram_bot_token and self.telegram_chat_id:
+            object.__setattr__(self, "enabled", True)
+
+
+# ============================================================
+# KILL-SWITCH / SESSION PERSISTENCE
+# ============================================================
+
+@dataclass(frozen=True)
+class KillSwitchConfig:
+    killswitch_path: Path = Path("/tmp/nifty_bot_killswitch")
+    session_state_path: Path = Path.home() / ".nifty_bot" / "session_state.json"
+    session_save_interval_sec: float = 30.0
+
+
+# ============================================================
+# WEBSOCKET GAP RECOVERY
+# ============================================================
+
+@dataclass(frozen=True)
+class WSRecoveryConfig:
+    gap_sync_interval_sec: float = 60.0
+    gap_candle_missing_min: int = 5
+    warm_up_history_timeout_sec: float = 30.0
+
+
+# ============================================================
 # ROOT CONFIG
 # ============================================================
 
@@ -288,6 +353,10 @@ class RootConfig:
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     dashboard: DashboardConfig = field(default_factory=DashboardConfig)
     backtest: BacktestConfig = field(default_factory=BacktestConfig)
+    alerting: AlertingConfig = field(default_factory=AlertingConfig)
+    killswitch: KillSwitchConfig = field(default_factory=KillSwitchConfig)
+    ws_recovery: WSRecoveryConfig = field(default_factory=WSRecoveryConfig)
+    margin_safety: MarginSafetyConfig = field(default_factory=MarginSafetyConfig)
 
     def __post_init__(self) -> None:
         # ensure runtime dirs exist regardless of mode

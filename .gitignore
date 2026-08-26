@@ -12,3 +12,4 @@ reports/
 download_data.py
 run_*.py
 validate_*.py
+.env

@@ -42,15 +42,22 @@ class MarginManager:
         self._paper_equity_override = paper_equity_override
 
     def get_available_margin(self) -> float:
-        if CONFIG.mode.value == "LIVE" or self._paper_equity_override is None:
+        if CONFIG.mode.value == "LIVE":
             data = self.kite.margins()
             equity_segment = data.get("equity", {})
             available = equity_segment.get("available", {}).get("live_balance", 0.0)
             return float(available)
-        return self._paper_equity_override
+        if self._paper_equity_override is None:
+            data = self.kite.margins()
+            equity_segment = data.get("equity", {})
+            available = equity_segment.get("available", {}).get("live_balance", 0.0)
+            return float(available)
+        return self._paper_equity_override * CONFIG.capital.margin_leverage_multiplier
 
     def update_paper_equity(self, new_equity: float) -> None:
         self._paper_equity_override = new_equity
+        if hasattr(self.kite, "set_paper_equity"):
+            self.kite.set_paper_equity(new_equity)
 
     def size_position(
         self,

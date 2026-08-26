@@ -147,8 +147,27 @@ def save_daily_report() -> tuple[Path, Path]:
     return _DAY_CSV, _DAY_DIR
 
 
+def send_daily_report_telegram() -> None:
+    from logger import send_telegram_alert
+    report = build_daily_report()
+    today_str = datetime.now().date().isoformat()
+    summary = report.get(today_str)
+    if not summary:
+        return
+    text = (
+        f"[NIFTY Bot] Daily Report {today_str}\n"
+        f"Trades: {summary['trades_count']} ({summary['wins']}W/{summary['losses']}L)\n"
+        f"Net PnL: Rs.{summary['net_pnl']:,.2f}\n"
+        f"WinRate: {summary['win_rate_pct']}%\n"
+        f"GrossProfit: Rs.{summary['gross_profit']:,.2f}\n"
+        f"GrossLoss: Rs.{summary['gross_loss']:,.2f}"
+    )
+    send_telegram_alert("DAILY_REPORT", text)
+
+
 def main() -> None:
     csv_path, json_dir = save_daily_report()
+    send_daily_report_telegram()
     print(f"Daily CSV saved to: {csv_path}")
     print(f"Daily JSON files saved to: {json_dir}")
     print()

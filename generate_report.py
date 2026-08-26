@@ -38,12 +38,10 @@ from risk_manager import RiskManager
 from utils import Candle, TradeSide
 
 REPORT_DIR = Path(__file__).parent / "reports"
-LEVERAGE = 3
+LEVERAGE = 1
 CAPITAL_PER_TRADE = 3_00_000.0
 STARTING_EQUITY = CAPITAL_PER_TRADE * LEVERAGE
 TRAIL_TRIGGER_POINTS = 2.0
-TRAIL_INITIAL_RATIO = 8.0
-TRAIL_FINAL_RATIO = 5.0
 MAX_TRADES_PER_DAY = 10
 
 
@@ -194,21 +192,16 @@ def run_daily_backtest(kite: KiteAPI, spot_token: int, target_date: date) -> Dai
                     else open_trade["entry"] - px
                 )
                 if profit >= TRAIL_TRIGGER_POINTS:
-                    progress = min(
-                        (profit - TRAIL_TRIGGER_POINTS)
-                        / max(1, open_trade["target"] - open_trade["entry"] - TRAIL_TRIGGER_POINTS),
-                        1.0,
-                    )
-                    trail_ratio = TRAIL_INITIAL_RATIO - progress * (TRAIL_INITIAL_RATIO - TRAIL_FINAL_RATIO)
-                    trail_sl = (
-                        open_trade["entry"] + open_trade["initial_sl"] * trail_ratio / 8.0
-                        if open_trade["side"] == TradeSide.LONG
-                        else open_trade["entry"] - open_trade["initial_sl"] * trail_ratio / 8.0
-                    )
                     if open_trade["side"] == TradeSide.LONG:
-                        open_trade["sl"] = max(open_trade["sl"], trail_sl)
+                        if profit >= TRAIL_TRIGGER_POINTS + 1.0:
+                            open_trade["sl"] = max(open_trade["sl"], open_trade["entry"] + 2.0)
+                        else:
+                            open_trade["sl"] = max(open_trade["sl"], open_trade["entry"])
                     else:
-                        open_trade["sl"] = min(open_trade["sl"], trail_sl)
+                        if profit >= TRAIL_TRIGGER_POINTS + 1.0:
+                            open_trade["sl"] = min(open_trade["sl"], open_trade["entry"] - 2.0)
+                        else:
+                            open_trade["sl"] = min(open_trade["sl"], open_trade["entry"])
 
             if hit_target or hit_sl or force_exit:
                 exit_price = (
@@ -428,7 +421,7 @@ def generate_pdf_report(monthly_results: list[MonthlyResult], daily_results: lis
     elements.append(Paragraph(
         f"Capital: Rs.{CAPITAL_PER_TRADE:,.0f}/trade (3x Leverage = Rs.{STARTING_EQUITY:,.0f}) "
         f"| Max {MAX_TRADES_PER_DAY} trades/day "
-        f"| SL: 1:2 RR + Trailing SL ({TRAIL_TRIGGER_POINTS}pts trigger, {TRAIL_INITIAL_RATIO}:{TRAIL_FINAL_RATIO} tightening)",
+        f"| SL: 1:2 RR + Step Trailing SL ({TRAIL_TRIGGER_POINTS}pts trigger, entry+B/E at 3pts)",
         styles["Normal"],
     ))
     elements.append(Spacer(1, 4 * mm))
@@ -642,7 +635,7 @@ def main() -> None:
     print(f"Capital per Trade: Rs.{CAPITAL_PER_TRADE:,.0f}")
     print(f"Leverage: {LEVERAGE}x (Total Equity: Rs.{STARTING_EQUITY:,.0f})")
     print(f"Max Trades/Day: {MAX_TRADES_PER_DAY}")
-    print(f"SL: 1:2 RR | Trailing SL: {TRAIL_TRIGGER_POINTS}pts trigger, {TRAIL_INITIAL_RATIO}:{TRAIL_FINAL_RATIO} tightening")
+    print(f"SL: 1:2 RR | Trailing SL: {TRAIL_TRIGGER_POINTS}pts trigger, entry+B/E at 3pts")
     print("=" * 60)
 
     kite = KiteAPI()

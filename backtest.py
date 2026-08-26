@@ -36,7 +36,7 @@ from indicators import ema_series
 from logger import get_logger
 from risk_manager import RiskManager
 from strategy import StrategyEngine
-from utils import Candle, TradeSide, TRAIL_INITIAL_RATIO, TRAIL_FINAL_RATIO
+from utils import Candle, TradeSide, TRAIL_TRIGGER_POINTS
 
 _log = get_logger("backtest")
 
@@ -209,22 +209,17 @@ def run_backtest(csv_path: Path, starting_equity: float, delta_approx: float, lo
                     if open_trade["side"] == TradeSide.LONG
                     else open_trade["entry"] - px
                 )
-                if profit >= CONFIG.trade_mgmt.trail_step_index_points and open_trade["initial_sl"] > 0:
-                    progress = min(
-                        (profit - CONFIG.trade_mgmt.trail_step_index_points)
-                        / max(1, open_trade["target"] - open_trade["entry"] - CONFIG.trade_mgmt.trail_step_index_points),
-                        1.0,
-                    )
-                    trail_ratio = TRAIL_INITIAL_RATIO - progress * (TRAIL_INITIAL_RATIO - TRAIL_FINAL_RATIO)
-                    trail_sl = (
-                        open_trade["entry"] + open_trade["initial_sl"] * trail_ratio / 8.0
-                        if open_trade["side"] == TradeSide.LONG
-                        else open_trade["entry"] - open_trade["initial_sl"] * trail_ratio / 8.0
-                    )
+                if profit >= TRAIL_TRIGGER_POINTS and open_trade["initial_sl"] > 0:
                     if open_trade["side"] == TradeSide.LONG:
-                        open_trade["sl"] = max(open_trade["sl"], trail_sl)
+                        if profit >= TRAIL_TRIGGER_POINTS + 1.0:
+                            open_trade["sl"] = max(open_trade["sl"], open_trade["entry"] + 2.0)
+                        else:
+                            open_trade["sl"] = max(open_trade["sl"], open_trade["entry"])
                     else:
-                        open_trade["sl"] = min(open_trade["sl"], trail_sl)
+                        if profit >= TRAIL_TRIGGER_POINTS + 1.0:
+                            open_trade["sl"] = min(open_trade["sl"], open_trade["entry"] - 2.0)
+                        else:
+                            open_trade["sl"] = min(open_trade["sl"], open_trade["entry"])
 
             if hit_target or hit_sl or force_exit:
                 exit_price = open_trade["target"] if hit_target else (open_trade["sl"] if hit_sl else px)
