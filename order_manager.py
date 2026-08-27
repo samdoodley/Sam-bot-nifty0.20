@@ -813,8 +813,9 @@ class OrderManager:
             avg_price = float(h.get("average_price", 0.0) or 0.0)
         return filled_qty, avg_price
 
-    def _try_recover_sl_fill_price(self, symbol: str, position: Position) -> tuple[bool, float]:
-        sl_order_id = position.sl_order_id
+    def _try_recover_sl_fill_price(self, symbol: str, position: Position, sl_order_id: Optional[str] = None) -> tuple[bool, float]:
+        if not sl_order_id:
+            sl_order_id = position.sl_order_id
         if not sl_order_id:
             return False, 0.0
         try:
@@ -1244,7 +1245,7 @@ class OrderManager:
         self._reconcile_position(position)
         if position.state == PositionState.CLOSED:
             _log.info("Position %s already closed after SL cancellation", symbol)
-            recovered, sl_price = self._try_recover_sl_fill_price(symbol, position)
+            recovered, sl_price = self._try_recover_sl_fill_price(symbol, position, sl_order_id=sl_order_id)
             if recovered:
                 with self._lock:
                     position.exit_avg_price = sl_price

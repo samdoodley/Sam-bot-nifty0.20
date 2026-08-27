@@ -108,8 +108,8 @@ class SessionConfig:
     force_square_off_time: time = time(15, 15)
     market_close: time = time(15, 30)
 
-    enable_time_based_entry_gate: bool = False
-    first_entry_time: time = time(13, 10)
+    enable_time_based_entry_gate: bool = True
+    first_entry_time: time = time(12, 0)
 
     primary_timeframe_min: int = 5
     higher_timeframe_min: int = 15
