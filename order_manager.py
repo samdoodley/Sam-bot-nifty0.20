@@ -229,9 +229,16 @@ class OrderManager:
                     new_sl_trigger = position.entry_price
                     position.stop_loss = new_sl_trigger
 
-            if new_sl_trigger is not None and position.sl_order_id and new_sl_trigger != position.last_sl_trigger:
-                self._cancel_sl_order(symbol, position)
-                self._place_sl_m_order(symbol, position, new_sl_trigger)
+            if new_sl_trigger is not None and position.sl_order_id:
+                threshold = CONFIG.trade_mgmt.sl_m_slippage_points
+                if position.side == TradeSide.LONG:
+                    if new_sl_trigger > position.last_sl_trigger + threshold:
+                        self._cancel_sl_order(symbol, position)
+                        self._place_sl_m_order(symbol, position, new_sl_trigger)
+                else:
+                    if new_sl_trigger < position.last_sl_trigger - threshold:
+                        self._cancel_sl_order(symbol, position)
+                        self._place_sl_m_order(symbol, position, new_sl_trigger)
         elif profit >= TRAIL_TRIGGER_POINTS and position.initial_sl > 0:
             if position.side == TradeSide.LONG:
                 if profit >= TRAIL_TRIGGER_POINTS + 1.0:
