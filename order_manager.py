@@ -211,7 +211,28 @@ class OrderManager:
             if position.side == TradeSide.LONG
             else position.entry_price - ltp
         )
-        if profit >= TRAIL_TRIGGER_POINTS and position.initial_sl > 0:
+
+        if profit >= TRAIL_TRIGGER_POINTS and position.initial_sl > 0 and CONFIG.trade_mgmt.use_sl_m_after_trail:
+            new_sl_trigger = None
+            if position.side == TradeSide.LONG:
+                if profit >= CONFIG.trade_mgmt.trail_step_points + TRAIL_TRIGGER_POINTS:
+                    new_sl_trigger = max(position.entry_price + CONFIG.trade_mgmt.trail_lock_points, ltp - CONFIG.trade_mgmt.trail_step_points)
+                    position.stop_loss = new_sl_trigger
+                elif profit >= TRAIL_TRIGGER_POINTS:
+                    new_sl_trigger = position.entry_price
+                    position.stop_loss = new_sl_trigger
+            else:
+                if profit >= CONFIG.trade_mgmt.trail_step_points + TRAIL_TRIGGER_POINTS:
+                    new_sl_trigger = min(position.entry_price - CONFIG.trade_mgmt.trail_lock_points, ltp + CONFIG.trade_mgmt.trail_step_points)
+                    position.stop_loss = new_sl_trigger
+                elif profit >= TRAIL_TRIGGER_POINTS:
+                    new_sl_trigger = position.entry_price
+                    position.stop_loss = new_sl_trigger
+
+            if new_sl_trigger is not None and position.sl_order_id and new_sl_trigger != position.last_sl_trigger:
+                self._cancel_sl_order(symbol, position)
+                self._place_sl_m_order(symbol, position, new_sl_trigger)
+        elif profit >= TRAIL_TRIGGER_POINTS and position.initial_sl > 0:
             if position.side == TradeSide.LONG:
                 if profit >= TRAIL_TRIGGER_POINTS + 1.0:
                     position.stop_loss = max(position.stop_loss, position.entry_price + 2.0)
@@ -223,13 +244,17 @@ class OrderManager:
                 else:
                     position.stop_loss = min(position.stop_loss, position.entry_price)
 
-        new_trigger = round(position.stop_loss, 2)
-        if position.sl_order_id and new_trigger != position.last_sl_trigger:
-            self._modify_sl_order(symbol, position)
+            new_trigger = round(position.stop_loss, 2)
+            if position.sl_order_id and new_trigger != position.last_sl_trigger:
+                self._modify_sl_order(symbol, position)
 
         target_distance = abs(position.target - position.entry_price)
         if target_distance > 0 and profit >= CONFIG.trade_mgmt.profit_trail_pct * target_distance:
-            self._close_position(symbol, position, ltp, "PROFIT_TRAIL")
+            if CONFIG.trade_mgmt.use_sl_m_after_trail:
+                self._cancel_sl_order(symbol, position)
+                self._place_sl_m_order(symbol, position, position.target)
+            else:
+                self._close_position(symbol, position, ltp, "PROFIT_TRAIL")
             return
 
         if position.side == TradeSide.LONG:
@@ -442,6 +467,13 @@ class OrderManager:
         new_trigger = round(position.stop_loss, 2)
         new_limit = round(new_trigger + sl_offset, 2) if position.side == TradeSide.LONG else round(new_trigger - sl_offset, 2)
 
+        order_type = CONFIG.trade_mgmt.sl_order_type
+
+        if order_type == "SL-M":
+            self._cancel_sl_order(symbol, position)
+            self._place_sl_m_order(symbol, position, new_trigger)
+            return
+
         try:
             _log.info(
                 "ORDER_REQUEST | symbol=%s transaction_type=%s quantity=%d order_type=SL price=%.2f trigger_price=%.2f product=%s exchange=%s caller=_modify_sl_order",
@@ -464,6 +496,44 @@ class OrderManager:
             _log.info("SL_MODIFIED | symbol=%s | order_id=%s | new_trigger=%.2f | new_limit=%.2f", symbol, position.sl_order_id, new_trigger, new_limit)
         except Exception:
             _log.exception("Failed to modify SL order for %s", symbol)
+
+    def _place_sl_m_order(self, symbol: str, position: Position, trigger_price: float) -> None:
+        transaction_type = "SELL" if position.side == TradeSide.LONG else "BUY"
+        try:
+            _log.info(
+                "ORDER_REQUEST | symbol=%s transaction_type=%s quantity=%d order_type=SL-M trigger_price=%.2f product=%s exchange=%s caller=_place_sl_m_order",
+                symbol, transaction_type, position.quantity, round(trigger_price, 2), CONFIG.capital.product_type, CONFIG.instrument.option_exchange,
+            )
+            sl_order_id = self.kite.place_order(
+                tradingsymbol=symbol,
+                exchange=CONFIG.instrument.option_exchange,
+                transaction_type=transaction_type,
+                quantity=position.quantity,
+                product=CONFIG.capital.product_type,
+                order_type="SL-M",
+                trigger_price=round(trigger_price, 2),
+            )
+            with self._lock:
+                position.sl_order_id = sl_order_id
+                position.last_sl_trigger = round(trigger_price, 2)
+                self._sl_order_ids[symbol] = sl_order_id
+            _log.info("SL_M_ORDER_SUBMITTED | symbol=%s | order_id=%s | trigger=%.2f", symbol, sl_order_id, round(trigger_price, 2))
+        except Exception:
+            _log.exception("Failed to place SL-M order for %s", symbol)
+
+    def _cancel_sl_order(self, symbol: str, position: Position) -> None:
+        sl_order_id = position.sl_order_id
+        if not sl_order_id:
+            return
+        try:
+            self.kite.cancel_order(CONFIG.kite.variety_regular, sl_order_id)
+            _log.info("SL_CANCELLED | symbol=%s | order_id=%s", symbol, sl_order_id)
+        except Exception:
+            _log.exception("Failed to cancel SL order for %s", symbol)
+        with self._lock:
+            position.sl_order_id = None
+            position.last_sl_trigger = 0.0
+            self._sl_order_ids.pop(symbol, None)
 
     # ------------------------------------------------------------
     # CLOSE POSITION — SAFE (NON-BLOCKING)

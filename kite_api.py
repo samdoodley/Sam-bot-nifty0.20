@@ -182,10 +182,13 @@ class KiteAPI:
         order_type = order.get("order_type", "LIMIT")
         requested = order.get("quantity", 0)
         price = order.get("price", 0.0)
+        trigger = order.get("trigger_price", 0.0)
         if requested <= 0:
             return 0, 0.0
         if order_type == "MARKET":
             return requested, price if price > 0 else 0.0
+        if order_type == "SL-M":
+            return requested, trigger if trigger > 0 else price
         if order_type == "SL":
             return requested, price if price > 0 else 0.0
         fill_ratio = getattr(self, "_paper_fill_ratio", 1.0)
@@ -211,7 +214,7 @@ class KiteAPI:
             if status in ("CANCELLED", "REJECTED"):
                 continue
             order_type = order.get("order_type", "")
-            if order_type not in ("LIMIT", "MARKET"):
+            if order_type not in ("LIMIT", "MARKET", "SL", "SL-M"):
                 continue
             txn = order.get("transaction_type", "BUY")
             filled_qty = order.get("filled_quantity", 0)
@@ -234,6 +237,7 @@ class KiteAPI:
             requested = order.get("quantity", 0)
             remaining = order.get("remaining_quantity", requested)
             txn = order.get("transaction_type", "BUY")
+
             if order_type == "SL" and status == "TRIGGER PENDING":
                 if (txn == "SELL" and ltp <= trigger) or (txn == "BUY" and ltp >= trigger):
                     fill_qty, fill_price = self._simulate_fill(order)
@@ -245,6 +249,18 @@ class KiteAPI:
                         order["status"] = "COMPLETE" if order["remaining_quantity"] == 0 else "PARTIAL"
                         self._apply_fill_to_position(symbol, txn, fill_qty)
                         _log.info("PAPER SL filled: symbol=%s order_id=%s filled=%d remaining=%d price=%.2f", symbol, order_id, fill_qty, remaining - fill_qty, fill_price)
+                        self._cancel_opposite_protective_orders(symbol, txn)
+            elif order_type == "SL-M" and status == "TRIGGER PENDING":
+                if (txn == "SELL" and ltp <= trigger) or (txn == "BUY" and ltp >= trigger):
+                    fill_qty, fill_price = self._simulate_fill(order)
+                    fill_qty = min(fill_qty, remaining)
+                    if fill_qty > 0:
+                        order["filled_quantity"] = order.get("filled_quantity", 0) + fill_qty
+                        order["remaining_quantity"] = remaining - fill_qty
+                        order["average_price"] = fill_price
+                        order["status"] = "COMPLETE" if order["remaining_quantity"] == 0 else "PARTIAL"
+                        self._apply_fill_to_position(symbol, txn, fill_qty)
+                        _log.info("PAPER SL-M filled: symbol=%s order_id=%s filled=%d remaining=%d price=%.2f", symbol, order_id, fill_qty, remaining - fill_qty, fill_price)
                         self._cancel_opposite_protective_orders(symbol, txn)
             elif order_type == "LIMIT" and status in ("OPEN", "PARTIAL"):
                 current_qty = self._paper_positions.get(symbol, 0)
@@ -396,6 +412,10 @@ class KiteAPI:
             self._paper_orders[order_id] = order
 
             if order_type == "SL":
+                order["status"] = "TRIGGER PENDING"
+                order["filled_quantity"] = 0
+                order["remaining_quantity"] = requested_qty
+            elif order_type == "SL-M":
                 order["status"] = "TRIGGER PENDING"
                 order["filled_quantity"] = 0
                 order["remaining_quantity"] = requested_qty
