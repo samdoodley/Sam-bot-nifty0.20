@@ -130,8 +130,8 @@ class StrategyEngine:
 
             entry_price = current_price
             swing_high = max(c.high for c in closed_5m[-5:]) if len(closed_5m) >= 5 else closed_5m[-1].high
-            stop_loss = min(closed_5m[-1].high, swing_high)
-            stop_loss = max(stop_loss, entry_price + CONFIG.trade_mgmt.stop_loss_index_points_cap)
+            stop_loss = swing_high
+            stop_loss = min(stop_loss, entry_price + CONFIG.trade_mgmt.stop_loss_index_points_cap)
             sl_distance = stop_loss - entry_price
             target = entry_price - sl_distance * 2
 

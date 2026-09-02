@@ -122,6 +122,7 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def start_dashboard() -> ThreadingHTTPServer:
+    ThreadingHTTPServer.allow_reuse_address = True
     server = ThreadingHTTPServer((CONFIG.dashboard.host, CONFIG.dashboard.port), _Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()

@@ -438,26 +438,43 @@ class OrderManager:
             sl_trigger = position.stop_loss
             sl_limit = sl_trigger - sl_offset
 
+        order_type = CONFIG.trade_mgmt.sl_order_type
+
         try:
-            _log.info(
-                "ORDER_REQUEST | symbol=%s transaction_type=%s quantity=%d order_type=SL price=%.2f trigger_price=%.2f product=%s exchange=%s caller=_place_sl_order",
-                symbol, "SELL" if position.side == TradeSide.LONG else "BUY", position.quantity, sl_limit, sl_trigger, CONFIG.capital.product_type, CONFIG.instrument.option_exchange,
-            )
-            sl_order_id = self.kite.place_order(
-                tradingsymbol=symbol,
-                exchange=CONFIG.instrument.option_exchange,
-                transaction_type="SELL" if position.side == TradeSide.LONG else "BUY",
-                quantity=position.quantity,
-                product=CONFIG.capital.product_type,
-                order_type="SL",
-                price=round(sl_limit, 2),
-                trigger_price=round(sl_trigger, 2),
-            )
+            if order_type == "SL-M":
+                _log.info(
+                    "ORDER_REQUEST | symbol=%s transaction_type=%s quantity=%d order_type=SL-M trigger_price=%.2f product=%s exchange=%s caller=_place_sl_order",
+                    symbol, "SELL" if position.side == TradeSide.LONG else "BUY", position.quantity, sl_trigger, CONFIG.capital.product_type, CONFIG.instrument.option_exchange,
+                )
+                sl_order_id = self.kite.place_order(
+                    tradingsymbol=symbol,
+                    exchange=CONFIG.instrument.option_exchange,
+                    transaction_type="SELL" if position.side == TradeSide.LONG else "BUY",
+                    quantity=position.quantity,
+                    product=CONFIG.capital.product_type,
+                    order_type="SL-M",
+                    trigger_price=round(sl_trigger, 2),
+                )
+            else:
+                _log.info(
+                    "ORDER_REQUEST | symbol=%s transaction_type=%s quantity=%d order_type=SL price=%.2f trigger_price=%.2f product=%s exchange=%s caller=_place_sl_order",
+                    symbol, "SELL" if position.side == TradeSide.LONG else "BUY", position.quantity, sl_limit, sl_trigger, CONFIG.capital.product_type, CONFIG.instrument.option_exchange,
+                )
+                sl_order_id = self.kite.place_order(
+                    tradingsymbol=symbol,
+                    exchange=CONFIG.instrument.option_exchange,
+                    transaction_type="SELL" if position.side == TradeSide.LONG else "BUY",
+                    quantity=position.quantity,
+                    product=CONFIG.capital.product_type,
+                    order_type="SL",
+                    price=round(sl_limit, 2),
+                    trigger_price=round(sl_trigger, 2),
+                )
             with self._lock:
                 position.sl_order_id = sl_order_id
                 position.last_sl_trigger = round(sl_trigger, 2)
                 self._sl_order_ids[symbol] = sl_order_id
-            _log.info("SL_ORDER_SUBMITTED | symbol=%s | order_id=%s | trigger=%.2f | limit=%.2f", symbol, sl_order_id, sl_trigger, sl_limit)
+            _log.info("SL_ORDER_SUBMITTED | symbol=%s | order_id=%s | trigger=%.2f | order_type=%s", symbol, sl_order_id, sl_trigger, order_type)
         except Exception:
             _log.exception("Failed to place SL order for %s", symbol)
 
@@ -1067,9 +1084,16 @@ class OrderManager:
         if position.state != PositionState.OPEN:
             return
 
+        MAX_SL_REPAIR_RETRIES = 3
+
         sl_order_id = position.sl_order_id
         if not sl_order_id:
+            if position.sl_repair_count >= MAX_SL_REPAIR_RETRIES:
+                _log.warning("SL_WATCHDOG_MAX_RETRIES | symbol=%s | repairs=%d | firing market exit", symbol, position.sl_repair_count)
+                self._cancel_sl_and_market_exit(symbol, position, "SL_MAX_RETRIES_EXHAUSTED")
+                return
             _log.warning("SL_WATCHDOG_REPAIR_REQUIRED | symbol=%s | reason=SL_MISSING", symbol)
+            position.sl_repair_count += 1
             self._repair_sl_order(symbol, position, "SL_MISSING")
             return
 
@@ -1096,17 +1120,32 @@ class OrderManager:
             return
 
         if sl_status in ("REJECTED",):
+            if position.sl_repair_count >= MAX_SL_REPAIR_RETRIES:
+                _log.warning("SL_WATCHDOG_MAX_RETRIES | symbol=%s | repairs=%d | firing market exit", symbol, position.sl_repair_count)
+                self._cancel_sl_and_market_exit(symbol, position, "SL_MAX_RETRIES_EXHAUSTED")
+                return
             _log.warning("SL_WATCHDOG_FAILURE | symbol=%s | order_id=%s | status=REJECTED", symbol, sl_order_id)
+            position.sl_repair_count += 1
             self._attempt_sl_recovery(symbol, position, "SL_REJECTED")
             return
 
         if sl_status in ("UNKNOWN", "API_ERROR"):
+            if position.sl_repair_count >= MAX_SL_REPAIR_RETRIES:
+                _log.warning("SL_WATCHDOG_MAX_RETRIES | symbol=%s | repairs=%d | firing market exit", symbol, position.sl_repair_count)
+                self._cancel_sl_and_market_exit(symbol, position, "SL_MAX_RETRIES_EXHAUSTED")
+                return
             _log.warning("SL_WATCHDOG_REPAIR_REQUIRED | symbol=%s | order_id=%s | status=%s", symbol, sl_order_id, sl_status)
+            position.sl_repair_count += 1
             self._attempt_sl_recovery(symbol, position, f"SL_UNKNOWN_{sl_status}")
             return
 
         if sl_status in ("CANCELLED",):
+            if position.sl_repair_count >= MAX_SL_REPAIR_RETRIES:
+                _log.warning("SL_WATCHDOG_MAX_RETRIES | symbol=%s | repairs=%d | firing market exit", symbol, position.sl_repair_count)
+                self._cancel_sl_and_market_exit(symbol, position, "SL_MAX_RETRIES_EXHAUSTED")
+                return
             _log.warning("SL_WATCHDOG_REPAIR_REQUIRED | symbol=%s | order_id=%s | status=CANCELLED (unexpected)", symbol, sl_order_id)
+            position.sl_repair_count += 1
             self._repair_sl_order(symbol, position, "SL_CANCELLED")
             return
 

@@ -173,7 +173,7 @@ class StrategyConfig:
 @dataclass(frozen=True)
 class TradeManagementConfig:
     target_index_points: float = 10.0
-    stop_loss_index_points_cap: float = 4.0   # SL = min(swing_sl, this)
+    stop_loss_index_points_cap: float = 3.0   # SL = min(swing_sl, this)
 
     breakeven_trigger_index_points: float = 6.0
     breakeven_buffer_points: float = 0.5       # move SL to entry + this (buy side)
@@ -188,8 +188,7 @@ class TradeManagementConfig:
     premium_target_points: float = 15.0
     premium_stop_loss_points: float = 12.0
 
-    sl_order_type: str = "SL"                  # stop-limit, not SL-M (learned from
-                                                   # WickFill live-slippage experience)
+    sl_order_type: str = "SL-M"                # stop-market for guaranteed fill in live
     sl_limit_offset_points: float = 2.0         # limit price = trigger +/- this
     sl_escalation_watchdog_sec: float = 5.0     # if SL-limit unfilled in this
                                                    # window, fire market exit

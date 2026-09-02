@@ -181,6 +181,7 @@ class Position:
     highest_favorable_price: float = 0.0
     sl_order_id: Optional[str] = None
     last_sl_trigger: float = 0.0
+    sl_repair_count: int = 0
     entry_order_id: Optional[str] = None
     entry_filled_quantity: int = 0
     entry_avg_price: float = 0.0
