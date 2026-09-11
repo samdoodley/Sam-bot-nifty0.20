@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time as _time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
@@ -121,10 +122,28 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+class _DashboardServer(ThreadingHTTPServer):
+    allow_reuse_address = True
+
+
 def start_dashboard() -> ThreadingHTTPServer:
-    ThreadingHTTPServer.allow_reuse_address = True
-    server = ThreadingHTTPServer((CONFIG.dashboard.host, CONFIG.dashboard.port), _Handler)
+    host = CONFIG.dashboard.host
+    start_port = CONFIG.dashboard.port
+    server = None
+    bound_port = start_port
+    for port in range(start_port, start_port + 20):
+        try:
+            server = _DashboardServer((host, port), _Handler)
+            bound_port = port
+            break
+        except OSError:
+            if port < start_port + 19:
+                _log.debug("Dashboard port %d in use, trying next...", port)
+            else:
+                raise OSError(f"Could not bind dashboard on {host}:{start_port}-{start_port + 19}")
+    if bound_port != start_port:
+        _log.warning("Dashboard port %d was busy, using fallback port %d", start_port, bound_port)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
-    _log.info("Dashboard running at http://%s:%d", CONFIG.dashboard.host, CONFIG.dashboard.port)
+    _log.info("Dashboard running at http://%s:%d", host, bound_port)
     return server

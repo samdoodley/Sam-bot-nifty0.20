@@ -205,79 +205,62 @@ class OrderManager:
         reason = ""
         exit_price = ltp
 
-        # Trailing SL: when profit >= 2 points, start trailing
+        # Calculate profit
         profit = (
             ltp - position.entry_price
             if position.side == TradeSide.LONG
             else position.entry_price - ltp
         )
 
-        if profit >= TRAIL_TRIGGER_POINTS and position.initial_sl > 0 and CONFIG.trade_mgmt.use_sl_m_after_trail:
+        # Step-based trailing SL after target is reached
+        # SHORT: profit 3.0 → SL = entry - 2.0, profit 4.5 → SL = entry - 3.5
+        # LONG:  profit 3.0 → SL = entry + 2.0, profit 4.5 → SL = entry + 3.5
+        profit = (
+            ltp - position.entry_price
+            if position.side == TradeSide.LONG
+            else position.entry_price - ltp
+        )
+
+        if profit >= 2.0 and position.initial_sl > 0:
             new_sl_trigger = None
             if position.side == TradeSide.LONG:
-                if profit >= CONFIG.trade_mgmt.trail_step_points + TRAIL_TRIGGER_POINTS:
-                    new_sl_trigger = max(position.entry_price + CONFIG.trade_mgmt.trail_lock_points, ltp - CONFIG.trade_mgmt.trail_step_points)
-                    position.stop_loss = new_sl_trigger
-                elif profit >= TRAIL_TRIGGER_POINTS:
-                    new_sl_trigger = position.entry_price
-                    position.stop_loss = new_sl_trigger
-            else:
-                if profit >= CONFIG.trade_mgmt.trail_step_points + TRAIL_TRIGGER_POINTS:
-                    new_sl_trigger = min(position.entry_price - CONFIG.trade_mgmt.trail_lock_points, ltp + CONFIG.trade_mgmt.trail_step_points)
-                    position.stop_loss = new_sl_trigger
-                elif profit >= TRAIL_TRIGGER_POINTS:
-                    new_sl_trigger = position.entry_price
-                    position.stop_loss = new_sl_trigger
-
-            if new_sl_trigger is not None and position.sl_order_id:
-                threshold = CONFIG.trade_mgmt.sl_m_slippage_points
-                if position.side == TradeSide.LONG:
-                    if new_sl_trigger > position.last_sl_trigger + threshold:
-                        self._cancel_sl_order(symbol, position)
-                        self._place_sl_m_order(symbol, position, new_sl_trigger)
+                if profit >= 4.5:
+                    new_sl_trigger = position.entry_price + 3.5
+                elif profit >= 3.0:
+                    new_sl_trigger = position.entry_price + 2.0
                 else:
-                    if new_sl_trigger < position.last_sl_trigger - threshold:
-                        self._cancel_sl_order(symbol, position)
-                        self._place_sl_m_order(symbol, position, new_sl_trigger)
-        elif profit >= TRAIL_TRIGGER_POINTS and position.initial_sl > 0:
-            if position.side == TradeSide.LONG:
-                if profit >= TRAIL_TRIGGER_POINTS + 1.0:
-                    position.stop_loss = max(position.stop_loss, position.entry_price + 2.0)
-                else:
-                    position.stop_loss = max(position.stop_loss, position.entry_price)
+                    new_sl_trigger = position.entry_price + 1.5
             else:
-                if profit >= TRAIL_TRIGGER_POINTS + 1.0:
-                    position.stop_loss = min(position.stop_loss, position.entry_price - 2.0)
+                if profit >= 4.5:
+                    new_sl_trigger = position.entry_price - 3.5
+                elif profit >= 3.0:
+                    new_sl_trigger = position.entry_price - 2.0
                 else:
-                    position.stop_loss = min(position.stop_loss, position.entry_price)
+                    new_sl_trigger = position.entry_price - 1.5
 
-            new_trigger = round(position.stop_loss, 2)
-            if position.sl_order_id and new_trigger != position.last_sl_trigger:
-                self._modify_sl_order(symbol, position)
-
-        target_distance = abs(position.target - position.entry_price)
-        if target_distance > 0 and profit >= CONFIG.trade_mgmt.profit_trail_pct * target_distance:
-            if CONFIG.trade_mgmt.use_sl_m_after_trail:
-                self._cancel_sl_order(symbol, position)
-                self._place_sl_m_order(symbol, position, position.target)
-            else:
-                self._close_position(symbol, position, ltp, "PROFIT_TRAIL")
-            return
+            if new_sl_trigger is not None:
+                position.stop_loss = new_sl_trigger
+                if position.sl_order_id:
+                    threshold = CONFIG.trade_mgmt.sl_m_slippage_points
+                    if position.side == TradeSide.LONG:
+                        if new_sl_trigger > position.last_sl_trigger + threshold:
+                            self._cancel_sl_order(symbol, position)
+                            self._place_sl_m_order(symbol, position, new_sl_trigger)
+                    else:
+                        if new_sl_trigger < position.last_sl_trigger - threshold:
+                            self._cancel_sl_order(symbol, position)
+                            self._place_sl_m_order(symbol, position, new_sl_trigger)
 
         if position.side == TradeSide.LONG:
-            if ltp >= position.target:
-                should_exit = True
-                reason = "TARGET"
-                exit_price = position.target
-            elif ltp <= position.stop_loss:
+            # When target is hit, don't exit immediately - let trailing SL take over
+            # The step-based trailing logic above has already moved the SL
+            if ltp <= position.stop_loss:
                 self._cancel_sl_and_market_exit(symbol, position, "STOP_LOSS_TOUCH")
                 return
         else:
-            if ltp <= position.target:
-                should_exit = True
-                reason = "TARGET"
-                exit_price = position.target
-            elif ltp >= position.stop_loss:
+            # When target is hit, don't exit immediately - let trailing SL take over
+            # The step-based trailing logic above has already moved the SL
+            if ltp >= position.stop_loss:
                 self._cancel_sl_and_market_exit(symbol, position, "STOP_LOSS_TOUCH")
                 return
 
@@ -291,6 +274,14 @@ class OrderManager:
 
         if position.state == PositionState.ENTRY_FILLED:
             if not position.sl_order_id:
+                lock = CONFIG.trade_mgmt.immediate_trail_lock_points
+                if lock > 0:
+                    if position.side == TradeSide.LONG:
+                        position.stop_loss = max(position.stop_loss, position.entry_price + lock)
+                    else:
+                        position.stop_loss = min(position.stop_loss, position.entry_price - lock)
+                    _log.info("IMMEDIATE_SL_LOCK | symbol=%s | side=%s | new_sl=%.2f | lock_points=%.1f",
+                              symbol, position.side.value, position.stop_loss, lock)
                 self._place_sl_order(symbol, position)
                 if position.sl_order_id:
                     with self._lock:
@@ -368,6 +359,15 @@ class OrderManager:
 
                 broker_qty = self._get_broker_position_quantity(symbol)
                 _log.info("POSITION_CONFIRMED | symbol=%s | broker_qty=%d", symbol, broker_qty)
+
+                lock = CONFIG.trade_mgmt.immediate_trail_lock_points
+                if lock > 0:
+                    if position.side == TradeSide.LONG:
+                        position.stop_loss = max(position.stop_loss, position.entry_price + lock)
+                    else:
+                        position.stop_loss = min(position.stop_loss, position.entry_price - lock)
+                    _log.info("IMMEDIATE_SL_LOCK | symbol=%s | side=%s | new_sl=%.2f | lock_points=%.1f",
+                              symbol, position.side.value, position.stop_loss, lock)
 
                 self._place_sl_order(symbol, position)
 
@@ -1211,11 +1211,15 @@ class OrderManager:
         if position.side == TradeSide.LONG:
             if order_trigger < position.stop_loss - 1e-6:
                 _log.warning("SL_WATCHDOG_REPAIR_REQUIRED | symbol=%s | reason=SL_TRAILING_BEHIND order_trigger=%.2f current_sl=%.2f", symbol, order_trigger, position.stop_loss)
-                self._modify_sl_order(symbol, position)
+                new_trigger = round(position.stop_loss, 2)
+                self._cancel_sl_order(symbol, position)
+                self._place_sl_m_order(symbol, position, new_trigger)
         else:
             if order_trigger > position.stop_loss + 1e-6:
                 _log.warning("SL_WATCHDOG_REPAIR_REQUIRED | symbol=%s | reason=SL_TRAILING_BEHIND order_trigger=%.2f current_sl=%.2f", symbol, order_trigger, position.stop_loss)
-                self._modify_sl_order(symbol, position)
+                new_trigger = round(position.stop_loss, 2)
+                self._cancel_sl_order(symbol, position)
+                self._place_sl_m_order(symbol, position, new_trigger)
 
     def _reconcile_duplicate_sl(self, symbol: str, position: Position, current_sl_id: str) -> None:
         try:

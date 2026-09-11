@@ -96,11 +96,16 @@ class StrategyEngine:
                     return Signal(side=TradeSide.NONE, reason="WEAK_CANDLE", confidence_notes=f"body/range={body/rng:.2f}")
 
             entry_price = current_price
-            swing_low = min(c.low for c in closed_5m[-5:]) if len(closed_5m) >= 5 else closed_5m[-1].low
-            stop_loss = max(closed_5m[-1].low, swing_low)
-            stop_loss = min(stop_loss, entry_price - CONFIG.trade_mgmt.stop_loss_index_points_cap)
-            sl_distance = entry_price - stop_loss
-            target = entry_price + sl_distance * 2
+            if CONFIG.trade_mgmt.use_fixed_sl_target:
+                stop_loss = entry_price - CONFIG.trade_mgmt.fixed_sl_distance_index_points
+                sl_distance = CONFIG.trade_mgmt.fixed_sl_distance_index_points
+                target = entry_price + CONFIG.trade_mgmt.fixed_target_distance_index_points
+            else:
+                swing_low = min(c.low for c in closed_5m[-5:]) if len(closed_5m) >= 5 else closed_5m[-1].low
+                stop_loss = max(closed_5m[-1].low, swing_low)
+                stop_loss = min(stop_loss, entry_price - CONFIG.trade_mgmt.stop_loss_index_points_cap)
+                sl_distance = entry_price - stop_loss
+                target = entry_price + sl_distance * 2
 
             return Signal(
                 side=TradeSide.LONG,
@@ -129,11 +134,16 @@ class StrategyEngine:
                     return Signal(side=TradeSide.NONE, reason="WEAK_CANDLE", confidence_notes=f"body/range={body/rng:.2f}")
 
             entry_price = current_price
-            swing_high = max(c.high for c in closed_5m[-5:]) if len(closed_5m) >= 5 else closed_5m[-1].high
-            stop_loss = swing_high
-            stop_loss = min(stop_loss, entry_price + CONFIG.trade_mgmt.stop_loss_index_points_cap)
-            sl_distance = stop_loss - entry_price
-            target = entry_price - sl_distance * 2
+            if CONFIG.trade_mgmt.use_fixed_sl_target:
+                stop_loss = entry_price + CONFIG.trade_mgmt.fixed_sl_distance_index_points
+                sl_distance = CONFIG.trade_mgmt.fixed_sl_distance_index_points
+                target = entry_price - CONFIG.trade_mgmt.fixed_target_distance_index_points
+            else:
+                swing_high = max(c.high for c in closed_5m[-5:]) if len(closed_5m) >= 5 else closed_5m[-1].high
+                stop_loss = swing_high
+                stop_loss = min(stop_loss, entry_price + CONFIG.trade_mgmt.stop_loss_index_points_cap)
+                sl_distance = stop_loss - entry_price
+                target = entry_price - sl_distance * 2
 
             return Signal(
                 side=TradeSide.SHORT,

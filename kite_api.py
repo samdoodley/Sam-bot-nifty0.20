@@ -85,7 +85,19 @@ class KiteAPI:
         """
         Opens the Zerodha login URL in a browser, then prompts the user
         to paste the full redirect URL or the request_token extracted from it.
+
+        If the KITE_REQUEST_TOKEN environment variable is set, it is used
+        directly so the bot can start non-interactively.
         """
+        env_token = os.environ.get("KITE_REQUEST_TOKEN", "").strip()
+        if env_token:
+            _log.info("KITE_REQUEST_TOKEN env var provided - using it directly")
+            request_token = self._extract_request_token(env_token)
+            if request_token:
+                _log.info("Request Token Received (from env)")
+                return request_token
+            _log.error("KITE_REQUEST_TOKEN could not be parsed as a request_token")
+
         login_url = f"https://kite.zerodha.com/connect/login?api_key={CONFIG.kite.api_key}&v=3"
         _log.info("Opening Zerodha Login URL")
         opened = False

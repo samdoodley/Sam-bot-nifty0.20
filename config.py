@@ -198,10 +198,16 @@ class TradeManagementConfig:
     profit_trail_pct: float = 0.7               # exit when profit reaches 70% of target distance
 
     trail_start_points: float = 2.5             # start breakeven SL-M at this profit
-    trail_lock_points: float = 2.0              # lock 1.0 profit at this level
-    trail_step_points: float = 1.0              # trail SL by this many points per move
+    trail_lock_points: float = 2.0              # lock 2.0 profit at this level
+    trail_step_points: float = 2.0              # trail SL by 2 points per move (2-point gap)
+    immediate_trail_lock_points: float = 0.0    # 0 = keep initial strategy SL until trailing engages (avoids premature exit before trailing starts)
     use_sl_m_after_trail: bool = True           # use SL-M instead of SL-Limit after trail starts
     sl_m_slippage_points: float = 0.5           # expected slippage on SL-M fills
+
+    # Fixed SL/Target mode (overrides swing-based 1:2 RR)
+    use_fixed_sl_target: bool = True
+    fixed_sl_distance_index_points: float = 3.33          # SL = entry - 3.33 index points (~1.5 premium)
+    fixed_target_distance_index_points: float = 6.67      # target = entry - 6.67 index points (~3.0 premium)
 
 
 # ============================================================
@@ -211,7 +217,7 @@ class TradeManagementConfig:
 @dataclass(frozen=True)
 class PositionSizingConfig:
     risk_per_trade_pct_of_equity: float = 3.0   # % of account equity risked per trade
-    max_lots_per_trade: int = 10                 # hard ceiling regardless of margin
+    max_lots_per_trade: int = 27                 # hard ceiling regardless of margin (~2L at ~112 premium)
     round_lots_down: bool = True                  # never round up quantity
 
 

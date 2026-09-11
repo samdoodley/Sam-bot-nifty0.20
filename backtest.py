@@ -259,6 +259,12 @@ def run_backtest(csv_path: Path, starting_equity: float, delta_approx: float, lo
             "target": signal.target, "entry_time": candles_5m[i].ts,
             "initial_sl": initial_sl,
         }
+        lock = CONFIG.trade_mgmt.immediate_trail_lock_points
+        if lock > 0:
+            if open_trade["side"] == TradeSide.LONG:
+                open_trade["sl"] = max(open_trade["sl"], open_trade["entry"] + lock)
+            else:
+                open_trade["sl"] = min(open_trade["sl"], open_trade["entry"] - lock)
 
     return result
 

@@ -272,6 +272,12 @@ def run_daily_backtest(kite: KiteAPI, spot_token: int, target_date: date) -> Dai
             "initial_sl": initial_sl,
             "entry_time": candles_5m[i].ts,
         }
+        lock = CONFIG.trade_mgmt.immediate_trail_lock_points
+        if lock > 0:
+            if open_trade["side"] == TradeSide.LONG:
+                open_trade["sl"] = max(open_trade["sl"], open_trade["entry"] + lock)
+            else:
+                open_trade["sl"] = min(open_trade["sl"], open_trade["entry"] - lock)
 
     result.trades = trades_today
     result.wins = wins_today

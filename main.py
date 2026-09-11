@@ -278,7 +278,7 @@ class TradingBot:
         vwap_series = self._vwap_series_for(closed_5m)
 
         signal = self.strategy.evaluate(closed_5m, closed_15m, vwap_series, symbol="NIFTY")
-        if signal.side == TradeSide.SHORT:
+        if signal.side in (TradeSide.LONG, TradeSide.SHORT):
             if CONFIG.session.enable_time_based_entry_gate and now_ist_time() < CONFIG.session.first_entry_time:
                 return
             self._execute_signal(signal)
