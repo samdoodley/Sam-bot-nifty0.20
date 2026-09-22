@@ -240,6 +240,7 @@ class OrderManager:
 
             if new_sl_trigger is not None:
                 position.stop_loss = new_sl_trigger
+                position.trailing_sl_active = True
                 if position.sl_order_id:
                     threshold = CONFIG.trade_mgmt.sl_m_slippage_points
                     if position.side == TradeSide.LONG:
@@ -593,7 +594,7 @@ class OrderManager:
                     with self._lock:
                         if recovered:
                             position.exit_avg_price = sl_price
-                            position.exit_reason = "SL_FILLED"
+                            position.exit_reason = "TRAILING_PROFIT_LOCK" if position.trailing_sl_active else "SL_FILLED"
                         position.state = PositionState.CLOSED
                         position.was_ever_filled = True
                     self._finalize_closed_position(symbol, position)
@@ -1012,7 +1013,7 @@ class OrderManager:
                     with self._lock:
                         if recovered:
                             position.exit_avg_price = sl_price
-                            position.exit_reason = "SL_FILLED"
+                            position.exit_reason = "TRAILING_PROFIT_LOCK" if position.trailing_sl_active else "SL_FILLED"
                         position.state = PositionState.CLOSED
                     position.last_reconciled_at = datetime.now().isoformat()
                     _log.info("Reconciliation: %s broker_qty=0, was_ever_filled=True, no open orders -> CLOSED", symbol)
@@ -1052,7 +1053,7 @@ class OrderManager:
                     with self._lock:
                         if recovered:
                             position.exit_avg_price = sl_price
-                            position.exit_reason = "SL_FILLED"
+                            position.exit_reason = "TRAILING_PROFIT_LOCK" if position.trailing_sl_active else "SL_FILLED"
                         position.state = PositionState.CLOSED
                     position.last_reconciled_at = datetime.now().isoformat()
                     _log.info("Reconciliation: %s broker_qty=0, was_ever_filled=True, no open orders -> CLOSED", symbol)
@@ -1352,15 +1353,27 @@ class OrderManager:
         sl_order_id = position.sl_order_id
 
         if sl_order_id:
-            try:
-                self.kite.cancel_order(CONFIG.kite.variety_regular, sl_order_id)
-                _log.info("SL cancellation requested for %s order_id=%s", symbol, sl_order_id)
-            except Exception:
-                _log.exception("Failed to cancel SL order for %s", symbol)
+            sl_status = self._get_order_status(sl_order_id)
+            if sl_status in ("COMPLETE", "FILLED"):
+                self._reconcile_position(position)
+                if position.state == PositionState.CLOSED:
+                    recovered, sl_price = self._try_recover_sl_fill_price(symbol, position, sl_order_id=sl_order_id)
+                    with self._lock:
+                        if recovered:
+                            position.exit_avg_price = sl_price
+                        position.exit_reason = "TRAILING_PROFIT_LOCK" if position.trailing_sl_active else "SL_FILLED"
+                    self._finalize_closed_position(symbol, position)
+                    return
+            else:
+                try:
+                    self.kite.cancel_order(CONFIG.kite.variety_regular, sl_order_id)
+                    _log.info("SL cancellation requested for %s order_id=%s", symbol, sl_order_id)
+                except Exception:
+                    _log.exception("Failed to cancel SL order for %s", symbol)
 
-            with self._lock:
-                position.sl_order_id = None
-                position.last_sl_trigger = 0.0
+                with self._lock:
+                    position.sl_order_id = None
+                    position.last_sl_trigger = 0.0
 
         self._reconcile_position(position)
         if position.state == PositionState.CLOSED:
@@ -1369,7 +1382,7 @@ class OrderManager:
             if recovered:
                 with self._lock:
                     position.exit_avg_price = sl_price
-                    position.exit_reason = "SL_FILLED"
+                    position.exit_reason = "TRAILING_PROFIT_LOCK" if position.trailing_sl_active else "SL_FILLED"
             self._finalize_closed_position(symbol, position)
             return
 

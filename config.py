@@ -206,7 +206,7 @@ class TradeManagementConfig:
 
     # Fixed SL/Target mode (overrides swing-based 1:2 RR)
     use_fixed_sl_target: bool = True
-    fixed_sl_distance_index_points: float = 3.33          # SL = entry - 3.33 index points (~1.5 premium)
+    fixed_sl_distance_index_points: float = 4.44          # SL = entry - 4.44 index points (~2.0 premium)
     fixed_target_distance_index_points: float = 6.67      # target = entry - 6.67 index points (~3.0 premium)
 
 

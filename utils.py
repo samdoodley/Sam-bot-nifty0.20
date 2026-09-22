@@ -178,6 +178,7 @@ class Position:
     entry_time: datetime
     initial_sl: float = 0.0
     breakeven_moved: bool = False
+    trailing_sl_active: bool = False
     highest_favorable_price: float = 0.0
     sl_order_id: Optional[str] = None
     last_sl_trigger: float = 0.0
