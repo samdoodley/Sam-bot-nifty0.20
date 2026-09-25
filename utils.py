@@ -91,6 +91,29 @@ def is_force_square_off_time(t: Optional[dtime] = None) -> bool:
     return t >= CONFIG.session.force_square_off_time
 
 
+def _get_current_session(t: Optional[dtime] = None) -> int:
+    """Return the current trading session number (1-4) based on IST time.
+
+    Session boundaries:
+        Session 1: 12:30 - 13:50
+        Session 2: 13:50 - 14:20
+        Session 3: 14:20 - 15:00
+        Session 4: 15:00 - 15:25 (force square-off)
+    """
+    t = t or now_ist_time()
+    h, m = t.hour, t.minute
+    if (h, m) < (12, 30):
+        return 0  # pre-session (no trades)
+    elif (h, m) < (13, 50):
+        return 1
+    elif (h, m) < (14, 20):
+        return 2
+    elif (h, m) < (15, 0):
+        return 3
+    else:
+        return 4
+
+
 # ------------------------------------------------------------------
 # Rounding / lot math
 # ------------------------------------------------------------------
@@ -179,6 +202,7 @@ class Position:
     initial_sl: float = 0.0
     breakeven_moved: bool = False
     trailing_sl_active: bool = False
+    finalized: bool = False
     highest_favorable_price: float = 0.0
     sl_order_id: Optional[str] = None
     last_sl_trigger: float = 0.0

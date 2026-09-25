@@ -779,6 +779,12 @@ class OrderManager:
     # ------------------------------------------------------------
 
     def _finalize_closed_position(self, symbol: str, position: Position) -> None:
+        with self._lock:
+            if position.finalized:
+                _log.debug("Position %s already finalized — skipping duplicate EXIT", symbol)
+                return
+            position.finalized = True
+
         exit_price = position.exit_avg_price if position.exit_avg_price > 0 else position.entry_price
         pnl = self._compute_pnl(position, exit_price)
         result = ExitResult(pnl=pnl, reason=position.exit_reason or "CLOSED", exit_price=exit_price)

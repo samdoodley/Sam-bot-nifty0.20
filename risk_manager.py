@@ -13,7 +13,7 @@ from typing import Optional
 
 from config import CONFIG
 from logger import get_logger
-from utils import TradeSide
+from utils import TradeSide, _get_current_session
 
 _log = get_logger("risk_manager")
 
@@ -25,6 +25,8 @@ class RiskStats:
     wins: int = 0
     losses: int = 0
     consecutive_losses: int = 0
+    session_trades_taken: dict = field(default_factory=lambda: {1: 0, 2: 0, 3: 0, 4: 0})
+    session_pnl: dict = field(default_factory=lambda: {1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0})
 
 
 class RiskManager:
@@ -35,6 +37,20 @@ class RiskManager:
         self._daily_pnl: float = 0.0
 
     def can_take_new_trade(self) -> tuple[bool, str]:
+        # Check session-specific trade cap first
+        session = _get_current_session()
+        session_cap = CONFIG.strategy.session_trades_max.get(session, 0)
+        session_taken = self.stats.session_trades_taken.get(session, 0)
+        if session_cap > 0 and session_taken >= session_cap:
+            return False, f"SESSION_{session}_TRADE_CAP_REACHED"
+
+        # Check session profit target
+        session_profit_target = CONFIG.strategy.session_profit_target.get(session, 0)
+        if session_profit_target > 0:
+            session_pnl = self.stats.session_pnl.get(session, 0.0)
+            if session_pnl >= session_profit_target:
+                return False, f"SESSION_{session}_PROFIT_TARGET_HIT"
+
         if CONFIG.strategy.max_trades_per_day > 0 and self.stats.trades_taken >= CONFIG.strategy.max_trades_per_day:
             return False, "MAX_TRADES_REACHED"
 
@@ -48,13 +64,13 @@ class RiskManager:
             if self._daily_pnl >= profit_target:
                 return False, "DAILY_PROFIT_TARGET_HIT"
 
-        if CONFIG.strategy.max_consecutive_losses > 0 and self.stats.consecutive_losses >= CONFIG.strategy.max_consecutive_losses:
-            return False, "MAX_CONSECUTIVE_LOSSES"
-
         return True, "OK"
 
     def record_trade_result(self, pnl: float) -> None:
         self.stats.trades_taken += 1
+        session = _get_current_session()
+        self.stats.session_trades_taken[session] = self.stats.session_trades_taken.get(session, 0) + 1
+        self.stats.session_pnl[session] = self.stats.session_pnl.get(session, 0.0) + pnl
         self._daily_pnl += pnl
         self.stats.realized_pnl += pnl
 
@@ -66,8 +82,8 @@ class RiskManager:
             self.stats.consecutive_losses += 1
 
         _log.info(
-            "Trade result recorded: pnl=%.2f daily_pnl=%.2f consecutive_losses=%d",
-            pnl, self._daily_pnl, self.stats.consecutive_losses,
+            "Trade result recorded: pnl=%.2f daily_pnl=%.2f consecutive_losses=%d session=%d session_trades=%d session_pnl=%.2f",
+            pnl, self._daily_pnl, self.stats.consecutive_losses, session, self.stats.session_trades_taken[session], self.stats.session_pnl[session],
         )
 
     def win_rate(self) -> float:
@@ -81,3 +97,5 @@ class RiskManager:
         self.stats.wins = 0
         self.stats.losses = 0
         self.stats.consecutive_losses = 0
+        self.stats.session_trades_taken = {1: 0, 2: 0, 3: 0, 4: 0}
+        self.stats.session_pnl = {1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0}

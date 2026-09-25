@@ -947,6 +947,59 @@ class TestEntryStateFlow(unittest.TestCase):
         self.assertEqual(position.state, PositionState.CLOSED)
         self.assertEqual(position.exit_reason, "SL_FILLED")
 
+    def test_trailing_sl_short_exit_labels_as_profit_lock(self):
+        """When trailing SL triggers for a SHORT with trailing_sl_active=True,
+        exit reason must be 'TRAILING_PROFIT_LOCK', not 'SL_FILLED'."""
+        position = _make_position(state=PositionState.OPEN, sl_placed_at=datetime.now().isoformat())
+        position.side = TradeSide.SHORT
+        position.entry_price = 54.0
+        position.quantity = 100
+        position.stop_loss = 52.5
+        position.target = 51.0
+        position.initial_sl = 2.25
+        position.trailing_sl_active = True
+        position.last_sl_trigger = 52.5
+        position.sl_order_id = "sl_trailing"
+        with self.mgr._lock:
+            self.mgr._positions[position.contract.tradingsymbol] = position
+
+        self.kite.order_history.return_value = [
+            {"status": "COMPLETE", "filled_quantity": 100, "average_price": 52.5},
+        ]
+        self.kite.positions.return_value = {"net": [{"tradingsymbol": "TESTCE", "quantity": 0}]}
+
+        self.mgr._check_position_exit(position.contract.tradingsymbol)
+
+        self.assertEqual(position.state, PositionState.CLOSED)
+        self.assertEqual(position.exit_reason, "TRAILING_PROFIT_LOCK")
+        self.assertAlmostEqual(position.exit_avg_price, 52.5, places=2)
+
+    def test_initial_sl_short_exit_labels_as_sl_filled(self):
+        """When initial SL triggers for a SHORT (trailing_sl_active=False),
+        exit reason must be 'SL_FILLED'."""
+        position = _make_position(state=PositionState.OPEN, sl_placed_at=datetime.now().isoformat())
+        position.side = TradeSide.SHORT
+        position.entry_price = 54.0
+        position.quantity = 100
+        position.stop_loss = 56.25
+        position.target = 51.0
+        position.initial_sl = 2.25
+        position.trailing_sl_active = False
+        position.last_sl_trigger = 56.25
+        position.sl_order_id = "sl_initial"
+        with self.mgr._lock:
+            self.mgr._positions[position.contract.tradingsymbol] = position
+
+        self.kite.order_history.return_value = [
+            {"status": "COMPLETE", "filled_quantity": 100, "average_price": 56.25},
+        ]
+        self.kite.positions.return_value = {"net": [{"tradingsymbol": "TESTCE", "quantity": 0}]}
+
+        self.mgr._check_position_exit(position.contract.tradingsymbol)
+
+        self.assertEqual(position.state, PositionState.CLOSED)
+        self.assertEqual(position.exit_reason, "SL_FILLED")
+
 
 class TestPaperModeGuard(unittest.TestCase):
     def test_paper_mode_blocks_order_placement(self):

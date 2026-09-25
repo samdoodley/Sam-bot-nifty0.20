@@ -26,7 +26,7 @@ from indicators import (
     vwap_cross_count,
 )
 from logger import get_logger
-from utils import Signal, TradeSide, Candle
+from utils import Signal, TradeSide, Candle, _get_current_session
 
 _log = get_logger("strategy")
 
@@ -53,12 +53,17 @@ class StrategyEngine:
             return Signal(side=TradeSide.NONE, reason="EMA_NOT_READY")
 
         adx_val = adx(closed_5m, CONFIG.indicators.adx_period)
-        if adx_val is None or adx_val < CONFIG.strategy.adx_min:
-            return Signal(side=TradeSide.NONE, reason="ADX_LOW", confidence_notes=f"adx={adx_val}")
+        # Use session-specific ADX threshold if available
+        session = _get_current_session()
+        adx_threshold = CONFIG.strategy.session_adx_min.get(session, CONFIG.strategy.adx_min)
+        if adx_val is None or adx_val < adx_threshold:
+            return Signal(side=TradeSide.NONE, reason="ADX_LOW", confidence_notes=f"adx={adx_val} threshold={adx_threshold}")
 
         atr_val = atr(closed_5m, CONFIG.indicators.atr_period)
-        if atr_val is None or atr_val < CONFIG.strategy.atr_min_points:
-            return Signal(side=TradeSide.NONE, reason="ATR_TOO_LOW", confidence_notes=f"atr={atr_val}")
+        # Use session-specific ATR threshold if available
+        atr_threshold = CONFIG.strategy.session_atr_min.get(session, CONFIG.strategy.atr_min_points)
+        if atr_val is None or atr_val < atr_threshold:
+            return Signal(side=TradeSide.NONE, reason="ATR_TOO_LOW", confidence_notes=f"atr={atr_val} threshold={atr_threshold}")
 
         if ema_is_flat(
             closes_5m,

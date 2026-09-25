@@ -43,8 +43,8 @@ from order_manager import OrderManager
 from risk_manager import RiskManager
 from strategy import StrategyEngine
 from utils import (TradeSide, is_force_square_off_time, is_market_open,
-                   now_ist_time,
-                   )
+                    now_ist_time, _get_current_session,
+                    )
 
 _log = get_logger("main")
 
@@ -127,6 +127,8 @@ class TradingBot:
         gap_thread.start()
 
         dashboard.start_dashboard()
+        import session_dashboard
+        session_dashboard.start_session_dashboard()
 
         signal.signal(signal.SIGINT, _handle_sigterm)
         signal.signal(signal.SIGTERM, _handle_sigterm)
@@ -350,6 +352,32 @@ class TradingBot:
         while not _shutdown.is_set():
             try:
                 self.order_mgr.monitor_positions()
+
+                # Check if session profit target was hit - force close open positions
+                session = _get_current_session()
+                session_profit_target = CONFIG.strategy.session_profit_target.get(session, 0)
+                if session_profit_target > 0:
+                    realized = self.risk.stats.session_pnl.get(session, 0.0)
+
+                    # Check unrealized PnL on open positions for exact lock
+                    open_positions = self.order_mgr.get_open_positions()
+                    for pos in open_positions:
+                        ltp = self.order_mgr._get_ltp(pos.contract.tradingsymbol)
+                        if ltp is None or ltp <= 0:
+                            continue
+                        if pos.side == TradeSide.LONG:
+                            unrealized = (ltp - pos.entry_price) * pos.quantity
+                        else:
+                            unrealized = (pos.entry_price - ltp) * pos.quantity
+                        total = realized + unrealized
+                        if total >= session_profit_target:
+                            _log.info(
+                                "SESSION_PROFIT_TARGET_HIT | session=%d realized=%.2f unrealized=%.2f total=%.2f target=%.2f - force closing position",
+                                session, realized, unrealized, total, session_profit_target,
+                            )
+                            self.order_mgr.force_square_off_all()
+                            break
+
                 if is_force_square_off_time():
                     self.order_mgr.force_square_off_all()
             except Exception:

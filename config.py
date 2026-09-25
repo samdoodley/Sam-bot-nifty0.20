@@ -109,7 +109,7 @@ class SessionConfig:
     market_close: time = time(15, 30)
 
     enable_time_based_entry_gate: bool = True
-    first_entry_time: time = time(12, 0)
+    first_entry_time: time = time(12, 30)     # entries blocked until 12:30 IST (Session 1 start)
 
     primary_timeframe_min: int = 5
     higher_timeframe_min: int = 15
@@ -143,10 +143,10 @@ class IndicatorConfig:
 class StrategyConfig:
     adx_min: float = 12.0
     atr_min_points: float = 0.5            # minimum NIFTY-points ATR to trade;
-                                                  # below this = too quiet, skip
+                                                   # below this = too quiet, skip
     ema_flat_slope_lookback: int = 5        # bars used to judge "EMA is flat"
     ema_flat_slope_min_points: float = 1.5  # min EMA20 movement over lookback
-                                                  # bars to NOT be considered flat
+                                                   # bars to NOT be considered flat
 
     pullback_max_distance_from_ema20_points: float = 35.0
     vwap_cross_lookback_bars: int = 10
@@ -156,12 +156,42 @@ class StrategyConfig:
 
     # confirmation candle
     strong_candle_body_to_range_min_pct: float = 0.25  # body >=25% of candle range
-                                                          # to count as "strong"
+                                                           # to count as "strong"
 
-    max_trades_per_day: int = 10
-    max_consecutive_losses: int = 5
+    max_trades_per_day: int = 32
+
+    # Per-session trade caps
+    session_trades_max: dict = field(default_factory=lambda: {
+        1: 10,   # Session 1: max 10 trades
+        2: 10,   # Session 2: max 10 trades
+        3: 7,    # Session 3: max 7 trades
+        4: 5,    # Session 4: max 5 trades
+    })
+
+    # Per-session profit target in rupees (0 = disabled)
+    session_profit_target: dict = field(default_factory=lambda: {
+        1: 3500,  # Session 1: stop after Rs.3,500 profit
+        2: 3500,  # Session 2: stop after Rs.3,500 profit
+        3: 0,     # Session 3: disabled
+        4: 0,     # Session 4: disabled
+    })
 
     manual_event_disable: bool = False      # flip True on RBI policy / budget days etc.
+
+    # Per-session ADX/ATR thresholds (override defaults when set)
+    # Session boundaries in IST: S1=12:30-13:50, S2=13:50-14:20, S3=14:20-15:00, S4=15:00-15:25
+    session_adx_min: dict = field(default_factory=lambda: {
+        1: 20.0,   # Session 1: ADX >= 20
+        2: 20.0,   # Session 2: ADX >= 20
+        3: 25.0,   # Session 3: ADX >= 25
+        4: 30.0,   # Session 4: ADX >= 30
+    })
+    session_atr_min: dict = field(default_factory=lambda: {
+        1: 10.0,   # Session 1: ATR >= 10
+        2: 10.0,   # Session 2: ATR >= 10
+        3: 10.0,   # Session 3: ATR >= 10
+        4: 12.0,   # Session 4: ATR >= 12
+    })
 
 
 # ============================================================
@@ -206,7 +236,7 @@ class TradeManagementConfig:
 
     # Fixed SL/Target mode (overrides swing-based 1:2 RR)
     use_fixed_sl_target: bool = True
-    fixed_sl_distance_index_points: float = 4.44          # SL = entry - 4.44 index points (~2.0 premium)
+    fixed_sl_distance_index_points: float = 4.89          # SL = entry - 4.89 index points (~2.20 premium)
     fixed_target_distance_index_points: float = 6.67      # target = entry - 6.67 index points (~3.0 premium)
 
 
