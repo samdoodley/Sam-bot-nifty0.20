@@ -59,6 +59,11 @@ class StrategyEngine:
         if adx_val is None or adx_val < adx_threshold:
             return Signal(side=TradeSide.NONE, reason="ADX_LOW", confidence_notes=f"adx={adx_val} threshold={adx_threshold}")
 
+        # Session-specific ADX upper bound (skip over-extended trends)
+        adx_max = CONFIG.strategy.session_adx_max.get(session)
+        if adx_max is not None and adx_val > adx_max:
+            return Signal(side=TradeSide.NONE, reason="ADX_HIGH", confidence_notes=f"adx={adx_val} max={adx_max}")
+
         atr_val = atr(closed_5m, CONFIG.indicators.atr_period)
         # Use session-specific ATR threshold if available
         atr_threshold = CONFIG.strategy.session_atr_min.get(session, CONFIG.strategy.atr_min_points)
@@ -97,8 +102,9 @@ class StrategyEngine:
                 curr_close = current_price
                 body = abs(curr_close - prev_close)
                 rng = max(curr_close, prev_close) - min(curr_close, prev_close)
-                if rng > 0 and body / rng < CONFIG.strategy.strong_candle_body_to_range_min_pct:
-                    return Signal(side=TradeSide.NONE, reason="WEAK_CANDLE", confidence_notes=f"body/range={body/rng:.2f}")
+                strong_candle_min = CONFIG.strategy.session_strong_candle_min_pct.get(session, CONFIG.strategy.strong_candle_body_to_range_min_pct)
+                if rng > 0 and body / rng < strong_candle_min:
+                    return Signal(side=TradeSide.NONE, reason="WEAK_CANDLE", confidence_notes=f"body/range={body/rng:.2f} threshold={strong_candle_min}")
 
             entry_price = current_price
             if CONFIG.trade_mgmt.use_fixed_sl_target:
@@ -135,8 +141,9 @@ class StrategyEngine:
                 curr_close = current_price
                 body = abs(curr_close - prev_close)
                 rng = max(curr_close, prev_close) - min(curr_close, prev_close)
-                if rng > 0 and body / rng < CONFIG.strategy.strong_candle_body_to_range_min_pct:
-                    return Signal(side=TradeSide.NONE, reason="WEAK_CANDLE", confidence_notes=f"body/range={body/rng:.2f}")
+                strong_candle_min = CONFIG.strategy.session_strong_candle_min_pct.get(session, CONFIG.strategy.strong_candle_body_to_range_min_pct)
+                if rng > 0 and body / rng < strong_candle_min:
+                    return Signal(side=TradeSide.NONE, reason="WEAK_CANDLE", confidence_notes=f"body/range={body/rng:.2f} threshold={strong_candle_min}")
 
             entry_price = current_price
             if CONFIG.trade_mgmt.use_fixed_sl_target:

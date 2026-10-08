@@ -212,31 +212,18 @@ class OrderManager:
             else position.entry_price - ltp
         )
 
-        # Step-based trailing SL after target is reached
-        # SHORT: profit 3.0 → SL = entry - 2.0, profit 4.5 → SL = entry - 3.5
-        # LONG:  profit 3.0 → SL = entry + 2.0, profit 4.5 → SL = entry + 3.5
-        profit = (
-            ltp - position.entry_price
-            if position.side == TradeSide.LONG
-            else position.entry_price - ltp
-        )
-
-        if profit >= 2.0 and position.initial_sl > 0:
+        # Config-driven trailing SL ladder (premium points)
+        # CONFIG.trade_mgmt.trailing_sl_ladder = [(profit_trigger, lock_profit), ...]
+        if position.initial_sl > 0:
             new_sl_trigger = None
-            if position.side == TradeSide.LONG:
-                if profit >= 4.5:
-                    new_sl_trigger = position.entry_price + 3.5
-                elif profit >= 3.0:
-                    new_sl_trigger = position.entry_price + 2.0
+            for trigger, lock in CONFIG.trade_mgmt.trailing_sl_ladder:
+                if profit >= trigger:
+                    if position.side == TradeSide.LONG:
+                        new_sl_trigger = position.entry_price + lock
+                    else:
+                        new_sl_trigger = position.entry_price - lock
                 else:
-                    new_sl_trigger = position.entry_price + 1.5
-            else:
-                if profit >= 4.5:
-                    new_sl_trigger = position.entry_price - 3.5
-                elif profit >= 3.0:
-                    new_sl_trigger = position.entry_price - 2.0
-                else:
-                    new_sl_trigger = position.entry_price - 1.5
+                    break
 
             if new_sl_trigger is not None:
                 position.stop_loss = new_sl_trigger

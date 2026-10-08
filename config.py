@@ -68,7 +68,7 @@ class KiteConfig:
 
 @dataclass(frozen=True)
 class CapitalConfig:
-    configured_capital: float = 3_00_000.0   # 3 lakh base capital
+    configured_capital: float = 2_50_000.0   # 2.5 lakh base capital
     product_type: str = "MIS"               # intraday only
     max_exposure_pct_of_margin: float = 0.90  # never use more than 90% of
                                                # available margin on one trade
@@ -186,11 +186,23 @@ class StrategyConfig:
         3: 25.0,   # Session 3: ADX >= 25
         4: 30.0,   # Session 4: ADX >= 30
     })
+    session_adx_max: dict = field(default_factory=lambda: {
+        1: 35.0,   # Session 1: ADX > 35 = skip
+        2: 40.0,   # Session 2: ADX > 40 = skip
+        3: 32.0,   # Session 3: ADX > 32 = skip
+        4: 35.0,   # Session 4: ADX > 35 = skip
+    })
     session_atr_min: dict = field(default_factory=lambda: {
         1: 10.0,   # Session 1: ATR >= 10
         2: 10.0,   # Session 2: ATR >= 10
         3: 10.0,   # Session 3: ATR >= 10
         4: 12.0,   # Session 4: ATR >= 12
+    })
+    session_strong_candle_min_pct: dict = field(default_factory=lambda: {
+        1: 0.25,   # Session 1: body >= 25% of range
+        2: 0.25,   # Session 2: body >= 25% of range
+        3: 0.30,   # Session 3: body >= 30% of range
+        4: 0.35,   # Session 4: body >= 35% of range
     })
 
 
@@ -234,10 +246,29 @@ class TradeManagementConfig:
     use_sl_m_after_trail: bool = True           # use SL-M instead of SL-Limit after trail starts
     sl_m_slippage_points: float = 0.5           # expected slippage on SL-M fills
 
+    # Configurable trailing SL ladder (premium points)
+    # List of (profit_trigger, lock_profit) tuples
+    # Example: [(1.5, 1.0), (2.0, 1.5), (2.5, 2.0), (3.0, 2.5), (3.5, 3.0), (4.0, 3.5), (4.5, 4.0), (5.0, 4.5), (5.5, 5.0), (6.0, 5.5)]
+    trailing_sl_ladder: list = field(default_factory=lambda: [
+        (1.5, 1.0),   # profit >= 1.5 → lock 1.0
+        (2.0, 1.5),   # profit >= 2.0 → lock 1.5
+        (2.5, 2.0),   # profit >= 2.5 → lock 2.0
+        (3.0, 2.5),   # profit >= 3.0 → lock 2.5
+        (3.5, 3.0),   # profit >= 3.5 → lock 3.0
+        (4.0, 3.5),   # profit >= 4.0 → lock 3.5
+        (4.5, 4.0),   # profit >= 4.5 → lock 4.0
+        (5.0, 4.5),   # profit >= 5.0 → lock 4.5
+        (5.5, 5.0),   # profit >= 5.5 → lock 5.0
+        (6.0, 5.5),   # profit >= 6.0 → lock 5.5
+    ])
+
     # Fixed SL/Target mode (overrides swing-based 1:2 RR)
     use_fixed_sl_target: bool = True
     fixed_sl_distance_index_points: float = 4.89          # SL = entry - 4.89 index points (~2.20 premium)
     fixed_target_distance_index_points: float = 6.67      # target = entry - 6.67 index points (~3.0 premium)
+
+    # Explicit premium SL (overrides the delta-based index conversion when > 0)
+    initial_sl_premium_points: float = 2.0                # option premium SL = entry_premium -/+ 2.0
 
 
 # ============================================================
@@ -247,7 +278,7 @@ class TradeManagementConfig:
 @dataclass(frozen=True)
 class PositionSizingConfig:
     risk_per_trade_pct_of_equity: float = 3.0   # % of account equity risked per trade
-    max_lots_per_trade: int = 27                 # hard ceiling regardless of margin (~2L at ~112 premium)
+    max_lots_per_trade: int = 20                 # hard ceiling regardless of margin (~1.5L at ~112 premium)
     round_lots_down: bool = True                  # never round up quantity
 
 
@@ -275,7 +306,7 @@ class OrderConfig:
     max_order_retries: int = 3
     reject_retry_backoff_sec: float = 2.0
     exit_limit_timeout_sec: float = 3.0
-    entry_fill_timeout_sec: float = 300.0
+    entry_fill_timeout_sec: float = 120.0
 
 
 # ============================================================

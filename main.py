@@ -322,11 +322,14 @@ class TradingBot:
         delta_approx = 0.45
         sl_distance_index = abs(signal.entry_price - signal.stop_loss)
         target_distance_index = abs(signal.target - signal.entry_price)
+        premium_sl_distance = CONFIG.trade_mgmt.initial_sl_premium_points
+        if premium_sl_distance <= 0:
+            premium_sl_distance = delta_approx * sl_distance_index
         if signal.side == TradeSide.LONG:
-            premium_sl = premium - delta_approx * sl_distance_index
+            premium_sl = premium - premium_sl_distance
             premium_target = premium + delta_approx * target_distance_index
         else:
-            premium_sl = premium + delta_approx * sl_distance_index
+            premium_sl = premium + premium_sl_distance
             premium_target = premium - delta_approx * target_distance_index
         premium_sl = max(premium_sl, 0.05)
 
@@ -334,7 +337,7 @@ class TradingBot:
         self.order_mgr.enter_position(
             contract=contract, side=signal.side, quantity=sizing.quantity,
             entry_price=premium, stop_loss=premium_sl, target=premium_target,
-            initial_sl=delta_approx * sl_distance_index,
+            initial_sl=premium_sl_distance,
         )
         self._subscribe_active_option(contract.instrument_token)
         send_telegram_alert("POSITION_OPEN", f"{contract.tradingsymbol} qty={sizing.quantity} side={signal.side.value}")
