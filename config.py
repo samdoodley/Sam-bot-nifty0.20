@@ -68,7 +68,7 @@ class KiteConfig:
 
 @dataclass(frozen=True)
 class CapitalConfig:
-    configured_capital: float = 2_50_000.0   # 2.5 lakh base capital
+    configured_capital: float = 2_00_000.0   # 2 lakh base capital
     product_type: str = "MIS"               # intraday only
     max_exposure_pct_of_margin: float = 0.90  # never use more than 90% of
                                                # available margin on one trade
@@ -170,8 +170,8 @@ class StrategyConfig:
 
     # Per-session profit target in rupees (0 = disabled)
     session_profit_target: dict = field(default_factory=lambda: {
-        1: 3500,  # Session 1: stop after Rs.3,500 profit
-        2: 3500,  # Session 2: stop after Rs.3,500 profit
+        1: 2500,  # Session 1: stop after Rs.2,500 profit
+        2: 2500,  # Session 2: stop after Rs.2,500 profit
         3: 0,     # Session 3: disabled
         4: 0,     # Session 4: disabled
     })
@@ -278,7 +278,7 @@ class TradeManagementConfig:
 @dataclass(frozen=True)
 class PositionSizingConfig:
     risk_per_trade_pct_of_equity: float = 3.0   # % of account equity risked per trade
-    max_lots_per_trade: int = 20                 # hard ceiling regardless of margin (~1.5L at ~112 premium)
+    max_lots_per_trade: int = 17                 # hard ceiling regardless of margin (~1.1L at ~100 premium)
     round_lots_down: bool = True                  # never round up quantity
 
 
