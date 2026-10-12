@@ -68,6 +68,10 @@ def _summarize_trades(trades: list[dict]) -> dict:
 
 def build_daily_report(max_trades: int = 5000) -> dict[str, dict]:
     trades = read_recent_trades(max_trades)
+    # Only completed trades (EXIT events) belong in the daily report.
+    # ENTRY / ENTRY_REQUESTED events are logged alongside each exit and
+    # would otherwise be double/triple-counted via the ts fallback.
+    trades = [t for t in trades if t.get("event") == "EXIT"]
 
     by_date: dict[str, list[dict]] = defaultdict(list)
     for t in trades:
