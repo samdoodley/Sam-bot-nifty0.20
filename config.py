@@ -190,7 +190,7 @@ class StrategyConfig:
         1: 35.0,   # Session 1: ADX > 35 = skip
         2: 40.0,   # Session 2: ADX > 40 = skip
         3: 32.0,   # Session 3: ADX > 32 = skip
-        4: 35.0,   # Session 4: ADX > 35 = skip
+        4: 37.0,   # Session 4: ADX > 37 = skip
     })
     session_atr_min: dict = field(default_factory=lambda: {
         1: 10.0,   # Session 1: ATR >= 10
