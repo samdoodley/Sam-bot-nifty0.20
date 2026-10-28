@@ -19,6 +19,17 @@ from typing import Callable, Optional
 from config import CONFIG, TradingMode
 from kite_api import KiteAPI
 from logger import get_logger, log_decision, log_structured
+from trade_execution_logger import (
+    log_order_filled,
+    log_order_requested,
+    order_cancelled,
+    log_position_closed,
+    log_sl_cancelled,
+    log_sl_filled,
+    log_sl_initiated,
+    log_sl_modified,
+    log_trade_error,
+)
 from trade_journal import record_trade
 from utils import OptionContract, Position, PositionState, TradeSide, TRAIL_TRIGGER_POINTS
 
@@ -107,8 +118,34 @@ class OrderManager:
             position.entry_requested_at = datetime.now().isoformat()
             position.state = PositionState.ENTRY_PENDING
             _log.info("ENTRY_ORDER_SUBMITTED | symbol=%s order_id=%s", contract.tradingsymbol, order_id)
+
+            log_order_requested(
+                symbol=contract.tradingsymbol,
+                side=side.value,
+                quantity=quantity,
+                entry_price=entry_price,
+                order_id=order_id,
+                order_type=CONFIG.order.entry_order_type,
+                reason="ENTRY_REQUESTED",
+                strike=contract.strike,
+                option_type=contract.option_type,
+                expiry=contract.expiry,
+                lot_size=contract.lot_size,
+            )
         except Exception:
             _log.exception("Failed to place entry order for %s", contract.tradingsymbol)
+            log_trade_error(
+                symbol=contract.tradingsymbol,
+                side=side.value,
+                quantity=quantity,
+                error="Entry order placement failed",
+                stage="ORDER_REQUESTED",
+                reason="ENTRY_ORDER_FAILED",
+                strike=contract.strike,
+                option_type=contract.option_type,
+                expiry=contract.expiry,
+                lot_size=contract.lot_size,
+            )
             return
 
         with self._lock:
@@ -311,6 +348,15 @@ class OrderManager:
                     try:
                         self.kite.cancel_order(CONFIG.kite.variety_regular, entry_order_id)
                         _log.info("Entry order cancelled for timeout (retry): %s", entry_order_id)
+                        order_cancelled(
+                            symbol=symbol,
+                            side=position.side.value,
+                            quantity=position.quantity,
+                            order_id=entry_order_id,
+                            reason="ENTRY_TIMEOUT_CANCELLED",
+                            entry_price=position.entry_price,
+                            entry_order_type=CONFIG.order.entry_order_type,
+                        )
                     except Exception:
                         _log.exception("Failed to cancel timed-out entry order for %s", symbol)
 
@@ -348,6 +394,18 @@ class OrderManager:
                     position.was_ever_filled = True
 
                 _log.info("ENTRY_FILLED | symbol=%s | qty=%d | average_price=%.2f", symbol, filled_qty, position.entry_avg_price)
+
+                log_order_filled(
+                    symbol=symbol,
+                    side=position.side.value,
+                    quantity=position.quantity,
+                    filled_quantity=filled_qty,
+                    avg_price=position.entry_avg_price,
+                    order_id=position.entry_order_id,
+                    entry_price=position.entry_price,
+                    stop_loss=position.stop_loss,
+                    target=position.target,
+                )
 
                 broker_qty = self._get_broker_position_quantity(symbol)
                 _log.info("POSITION_CONFIRMED | symbol=%s | broker_qty=%d", symbol, broker_qty)
@@ -467,8 +525,29 @@ class OrderManager:
                 position.last_sl_trigger = round(sl_trigger, 2)
                 self._sl_order_ids[symbol] = sl_order_id
             _log.info("SL_ORDER_SUBMITTED | symbol=%s | order_id=%s | trigger=%.2f | order_type=%s", symbol, sl_order_id, sl_trigger, order_type)
+
+            log_sl_initiated(
+                symbol=symbol,
+                side=position.side.value,
+                quantity=position.quantity,
+                sl_trigger=sl_trigger,
+                sl_limit=sl_limit,
+                sl_order_id=sl_order_id,
+                order_type=order_type,
+                entry_price=position.entry_price,
+            )
         except Exception:
             _log.exception("Failed to place SL order for %s", symbol)
+            log_trade_error(
+                symbol=symbol,
+                side=position.side.value,
+                quantity=position.quantity,
+                error="SL order placement failed",
+                stage="SL_INITIATED",
+                order_id=position.sl_order_id,
+                entry_price=position.entry_price,
+                stop_loss=position.stop_loss,
+            )
 
     def _modify_sl_order(self, symbol: str, position: Position) -> None:
         if not position.sl_order_id:
@@ -510,8 +589,28 @@ class OrderManager:
             with self._lock:
                 position.last_sl_trigger = new_trigger
             _log.info("SL_MODIFIED | symbol=%s | order_id=%s | new_trigger=%.2f | new_limit=%.2f", symbol, position.sl_order_id, new_trigger, new_limit)
+
+            log_sl_modified(
+                symbol=symbol,
+                side=position.side.value,
+                quantity=position.quantity,
+                old_trigger=position.stop_loss,
+                new_trigger=new_trigger,
+                sl_order_id=position.sl_order_id,
+                entry_price=position.entry_price,
+            )
         except Exception:
             _log.exception("Failed to modify SL order for %s", symbol)
+            log_trade_error(
+                symbol=symbol,
+                side=position.side.value,
+                quantity=position.quantity,
+                error="SL modify failed",
+                stage="SL_MODIFIED",
+                order_id=position.sl_order_id,
+                entry_price=position.entry_price,
+                stop_loss=position.stop_loss,
+            )
 
     def _place_sl_m_order(self, symbol: str, position: Position, trigger_price: float) -> None:
         transaction_type = "SELL" if position.side == TradeSide.LONG else "BUY"
@@ -544,8 +643,27 @@ class OrderManager:
         try:
             self.kite.cancel_order(CONFIG.kite.variety_regular, sl_order_id)
             _log.info("SL_CANCELLED | symbol=%s | order_id=%s", symbol, sl_order_id)
+            log_sl_cancelled(
+                symbol=symbol,
+                side=position.side.value,
+                quantity=position.quantity,
+                sl_order_id=sl_order_id,
+                reason="SL_CANCELLED",
+                entry_price=position.entry_price,
+                stop_loss=position.stop_loss,
+            )
         except Exception:
             _log.exception("Failed to cancel SL order for %s", symbol)
+            log_trade_error(
+                symbol=symbol,
+                side=position.side.value,
+                quantity=position.quantity,
+                error="SL cancel failed",
+                stage="SL_CANCELLED",
+                order_id=sl_order_id,
+                entry_price=position.entry_price,
+                stop_loss=position.stop_loss,
+            )
         with self._lock:
             position.sl_order_id = None
             position.last_sl_trigger = 0.0
@@ -792,6 +910,24 @@ class OrderManager:
             reason=position.exit_reason or "CLOSED",
             exit_price=round(exit_price, 2),
             pnl=round(pnl, 2),
+        )
+
+        log_position_closed(
+            symbol=symbol,
+            side=position.side.value,
+            quantity=position.quantity,
+            entry_price=position.effective_entry_price,
+            exit_price=exit_price,
+            pnl=round(pnl, 2),
+            reason=position.exit_reason or "CLOSED",
+            sl_order_id=position.sl_order_id,
+            exit_order_id=position.exit_order_id,
+            strike=position.contract.strike,
+            option_type=position.contract.option_type,
+            expiry=position.contract.expiry,
+            lot_size=position.contract.lot_size,
+            entry_time=position.entry_time.isoformat(),
+            exit_time=datetime.now().isoformat(),
         )
 
         record_trade(
@@ -1113,6 +1249,19 @@ class OrderManager:
 
         if sl_status in ("COMPLETE", "FILLED"):
             _log.info("SL_WATCHDOG_OK | symbol=%s | SL filled -> reconcile", symbol)
+
+            log_sl_filled(
+                symbol=symbol,
+                side=position.side.value,
+                quantity=position.quantity,
+                sl_trigger=position.stop_loss,
+                fill_price=position.exit_avg_price if position.exit_avg_price > 0 else position.stop_loss,
+                sl_order_id=sl_order_id,
+                pnl=0.0,
+                reason="SL_FILLED",
+                entry_price=position.entry_price,
+            )
+
             self._reconcile_position(position)
             if position.state == PositionState.CLOSED:
                 self._finalize_closed_position(symbol, position)
@@ -1597,6 +1746,11 @@ class OrderManager:
                 )
                 entry_time = datetime.fromisoformat(p["entry_time"]) if p.get("entry_time") else datetime.now()
                 state = PositionState(p.get("state", "OPEN"))
+                # Only import positions that are actually OPEN on the broker.
+                # ENTRY_REQUESTED, ENTRY_PENDING, ENTRY_FILLED, ENTRY_CANCELLED_TIMEOUT,
+                # ENTRY_FAILED are not real open positions — skip them.
+                if state != PositionState.OPEN:
+                    continue
                 if state == PositionState.CLOSED:
                     continue
                 position = Position(

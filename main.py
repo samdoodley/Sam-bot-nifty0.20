@@ -130,6 +130,9 @@ class TradingBot:
         import session_dashboard
         session_dashboard.start_session_dashboard()
 
+        import trade_tracking_dashboard
+        trade_tracking_dashboard.start_trade_tracking_dashboard()
+
         signal.signal(signal.SIGINT, _handle_sigterm)
         signal.signal(signal.SIGTERM, _handle_sigterm)
 
@@ -625,6 +628,10 @@ class TradingBot:
             self._save_session_state()
         except Exception:
             _log.exception("Failed to save session state on shutdown")
+        try:
+            trade_tracking_dashboard.stop_trade_tracking_dashboard()
+        except Exception:
+            _log.exception("Failed to stop trade tracking dashboard on shutdown")
         log_decision("BOT_SHUTDOWN", trades_today=self.risk.stats.trades_taken,
                      daily_pnl=round(self.risk._daily_pnl, 2))
         send_telegram_alert("BOT_SHUTDOWN", f"Trades={self.risk.stats.trades_taken} PnL={self.risk.stats.realized_pnl:.2f}")

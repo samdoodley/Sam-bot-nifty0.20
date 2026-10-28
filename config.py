@@ -326,6 +326,8 @@ class LoggingConfig:
     log_rotate_max_bytes: int = 10_000_000
     log_rotate_backups: int = 10
     decision_log_filename: str = "decisions.jsonl"   # structured, one JSON per line
+    trade_execution_log_filename: str = "trade_execution.jsonl"  # all trade lifecycle events
+    trade_error_log_filename: str = "trade_errors.jsonl"         # trade-related errors only
 
 
 # ============================================================
@@ -336,6 +338,13 @@ class LoggingConfig:
 class DashboardConfig:
     host: str = "127.0.0.1"
     port: int = 8765
+    refresh_interval_sec: float = 2.0
+
+
+@dataclass(frozen=True)
+class TradeTrackingDashboardConfig:
+    host: str = "0.0.0.0"          # bind to all interfaces so phone can access
+    port: int = 8767               # separate port for trade execution tracking
     refresh_interval_sec: float = 2.0
 
 
@@ -428,6 +437,7 @@ class RootConfig:
     order: OrderConfig = field(default_factory=OrderConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     dashboard: DashboardConfig = field(default_factory=DashboardConfig)
+    trade_tracking_dashboard: TradeTrackingDashboardConfig = field(default_factory=TradeTrackingDashboardConfig)
     backtest: BacktestConfig = field(default_factory=BacktestConfig)
     alerting: AlertingConfig = field(default_factory=AlertingConfig)
     killswitch: KillSwitchConfig = field(default_factory=KillSwitchConfig)
