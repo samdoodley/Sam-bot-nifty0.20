@@ -153,18 +153,21 @@ def save_daily_report() -> tuple[Path, Path]:
 
 def send_daily_report_telegram() -> None:
     from logger import send_telegram_alert
+    from session_dashboard import get_session_dashboard_url
     report = build_daily_report()
     today_str = datetime.now().date().isoformat()
     summary = report.get(today_str)
     if not summary:
         return
+    session_url = get_session_dashboard_url()
     text = (
         f"[NIFTY Bot] Daily Report {today_str}\n"
         f"Trades: {summary['trades_count']} ({summary['wins']}W/{summary['losses']}L)\n"
         f"Net PnL: Rs.{summary['net_pnl']:,.2f}\n"
         f"WinRate: {summary['win_rate_pct']}%\n"
         f"GrossProfit: Rs.{summary['gross_profit']:,.2f}\n"
-        f"GrossLoss: Rs.{summary['gross_loss']:,.2f}"
+        f"GrossLoss: Rs.{summary['gross_loss']:,.2f}\n"
+        f"📊 Session Dashboard: {session_url}"
     )
     send_telegram_alert("DAILY_REPORT", text)
 

@@ -37,6 +37,14 @@ class RiskManager:
         self._daily_pnl: float = 0.0
 
     def can_take_new_trade(self) -> tuple[bool, str]:
+        # Hard per-day loss limit (applies to paper + live)
+        if CONFIG.risk.stop_after_daily_loss_limit:
+            if self._daily_pnl <= -abs(CONFIG.risk.max_daily_loss_rupees):
+                return False, f"DAILY_LOSS_LIMIT_HIT_{CONFIG.risk.max_daily_loss_rupees:.0f}K"
+            loss_limit = self._starting_equity * CONFIG.risk.daily_loss_limit_pct_of_equity / 100.0
+            if self._daily_pnl <= -loss_limit:
+                return False, "DAILY_LOSS_LIMIT_HIT"
+
         # Check session-specific trade cap first
         session = _get_current_session()
         session_cap = CONFIG.strategy.session_trades_max.get(session, 0)
@@ -53,11 +61,6 @@ class RiskManager:
 
         if CONFIG.strategy.max_trades_per_day > 0 and self.stats.trades_taken >= CONFIG.strategy.max_trades_per_day:
             return False, "MAX_TRADES_REACHED"
-
-        if CONFIG.risk.stop_after_daily_loss_limit:
-            loss_limit = self._starting_equity * CONFIG.risk.daily_loss_limit_pct_of_equity / 100.0
-            if self._daily_pnl <= -loss_limit:
-                return False, "DAILY_LOSS_LIMIT_HIT"
 
         if CONFIG.risk.stop_after_daily_profit_target:
             profit_target = self._starting_equity * CONFIG.risk.daily_profit_target_pct_of_equity / 100.0

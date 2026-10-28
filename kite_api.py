@@ -198,7 +198,9 @@ class KiteAPI:
         if requested <= 0:
             return 0, 0.0
         if order_type == "MARKET":
-            return requested, price if price > 0 else 0.0
+            # Paper: simulate MARKET fill at ask ≈ mid + half_spread
+            half_spread = 0.25
+            return requested, (price or 0.0) + half_spread
         if order_type == "SL-M":
             return requested, trigger if trigger > 0 else price
         if order_type == "SL":

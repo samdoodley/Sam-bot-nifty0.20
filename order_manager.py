@@ -89,8 +89,10 @@ class OrderManager:
 
         try:
             _log.info(
-                "ORDER_REQUEST | symbol=%s transaction_type=%s quantity=%d order_type=LIMIT price=%.2f trigger_price=None product=%s exchange=%s caller=enter_position",
-                contract.tradingsymbol, transaction_type, quantity, round(entry_price, 2), CONFIG.capital.product_type, CONFIG.instrument.option_exchange,
+                "ORDER_REQUEST | symbol=%s transaction_type=%s quantity=%d order_type=%s price=%s trigger_price=None product=%s exchange=%s caller=enter_position",
+                contract.tradingsymbol, transaction_type, quantity, CONFIG.order.entry_order_type,
+                round(entry_price, 2) if CONFIG.order.entry_order_type == "LIMIT" else "MARKET",
+                CONFIG.capital.product_type, CONFIG.instrument.option_exchange,
             )
             order_id = self.kite.place_order(
                 tradingsymbol=contract.tradingsymbol,
@@ -98,8 +100,8 @@ class OrderManager:
                 transaction_type=transaction_type,
                 quantity=quantity,
                 product=CONFIG.capital.product_type,
-                order_type="LIMIT",
-                price=round(entry_price, 2),
+                order_type=CONFIG.order.entry_order_type,
+                price=round(entry_price, 2),  # Always pass for paper reference
             )
             position.entry_order_id = order_id
             position.entry_requested_at = datetime.now().isoformat()
@@ -207,9 +209,9 @@ class OrderManager:
 
         # Calculate profit
         profit = (
-            ltp - position.entry_price
+            ltp - position.effective_entry_price
             if position.side == TradeSide.LONG
-            else position.entry_price - ltp
+            else position.effective_entry_price - ltp
         )
 
         # Config-driven trailing SL ladder (premium points)
@@ -219,9 +221,9 @@ class OrderManager:
             for trigger, lock in CONFIG.trade_mgmt.trailing_sl_ladder:
                 if profit >= trigger:
                     if position.side == TradeSide.LONG:
-                        new_sl_trigger = position.entry_price + lock
+                        new_sl_trigger = position.effective_entry_price + lock
                     else:
-                        new_sl_trigger = position.entry_price - lock
+                        new_sl_trigger = position.effective_entry_price - lock
                 else:
                     break
 
@@ -265,9 +267,9 @@ class OrderManager:
                 lock = CONFIG.trade_mgmt.immediate_trail_lock_points
                 if lock > 0:
                     if position.side == TradeSide.LONG:
-                        position.stop_loss = max(position.stop_loss, position.entry_price + lock)
+                        position.stop_loss = max(position.stop_loss, position.effective_entry_price + lock)
                     else:
-                        position.stop_loss = min(position.stop_loss, position.entry_price - lock)
+                        position.stop_loss = min(position.stop_loss, position.effective_entry_price - lock)
                     _log.info("IMMEDIATE_SL_LOCK | symbol=%s | side=%s | new_sl=%.2f | lock_points=%.1f",
                               symbol, position.side.value, position.stop_loss, lock)
                 self._place_sl_order(symbol, position)
@@ -298,11 +300,17 @@ class OrderManager:
             try:
                 requested = datetime.fromisoformat(position.entry_requested_at)
                 elapsed = (datetime.now() - requested).total_seconds()
+
+                # LIMIT → MARKET fallback DISABLED (use LIMIT only, retry on next scan with fresh price)
+                # (fallback removed)
+
+                # Full timeout — cancel unfilled LIMIT, do not place MARKET, allow scan loop to retry
                 if elapsed > CONFIG.order.entry_fill_timeout_sec:
-                    _log.warning("Entry order %s for %s timed out after %.1fs", entry_order_id, symbol, elapsed)
+                    _log.warning("Entry order %s for %s timed out after %.1fs (LIMIT only, no MARKET fallback) — cancelling and releasing for retry",
+                                 entry_order_id, symbol, elapsed)
                     try:
                         self.kite.cancel_order(CONFIG.kite.variety_regular, entry_order_id)
-                        _log.info("Entry order cancelled for timeout: %s", entry_order_id)
+                        _log.info("Entry order cancelled for timeout (retry): %s", entry_order_id)
                     except Exception:
                         _log.exception("Failed to cancel timed-out entry order for %s", symbol)
 
@@ -310,18 +318,14 @@ class OrderManager:
                     broker_qty = self._get_broker_position_quantity(symbol)
                     with self._lock:
                         if broker_qty == 0 and not position.was_ever_filled:
-                            position.state = PositionState.ENTRY_CANCELLED_TIMEOUT
+                            position.state = PositionState.CLOSED
                             position.entry_order_id = None
                             position.entry_filled_quantity = 0
-                            position.entry_avg_price = 0.0
-                            _log.info("ENTRY_CANCELLED_TIMEOUT | symbol=%s | no position opened", symbol)
-                        elif broker_qty > 0 or position.was_ever_filled:
-                            position.state = PositionState.OPEN
-                            position.was_ever_filled = True
-                            _log.info("Entry timeout but position exists for %s — keeping OPEN", symbol)
-                        else:
-                            position.state = PositionState.ENTRY_FAILED
-                            position.entry_order_id = None
+                            if symbol in self._entry_order_ids:
+                                self._entry_order_ids.pop(symbol, None)
+                            # Release the cancelled, unfilled position so new entries can be placed
+                            if symbol in self._positions:
+                                del self._positions[symbol]
                     return
             except Exception:
                 pass
@@ -351,9 +355,9 @@ class OrderManager:
                 lock = CONFIG.trade_mgmt.immediate_trail_lock_points
                 if lock > 0:
                     if position.side == TradeSide.LONG:
-                        position.stop_loss = max(position.stop_loss, position.entry_price + lock)
+                        position.stop_loss = max(position.stop_loss, position.effective_entry_price + lock)
                     else:
-                        position.stop_loss = min(position.stop_loss, position.entry_price - lock)
+                        position.stop_loss = min(position.stop_loss, position.effective_entry_price - lock)
                     _log.info("IMMEDIATE_SL_LOCK | symbol=%s | side=%s | new_sl=%.2f | lock_points=%.1f",
                               symbol, position.side.value, position.stop_loss, lock)
 
@@ -772,7 +776,7 @@ class OrderManager:
                 return
             position.finalized = True
 
-        exit_price = position.exit_avg_price if position.exit_avg_price > 0 else position.entry_price
+        exit_price = position.exit_avg_price if position.exit_avg_price > 0 else position.effective_entry_price
         pnl = self._compute_pnl(position, exit_price)
         result = ExitResult(pnl=pnl, reason=position.exit_reason or "CLOSED", exit_price=exit_price)
 
@@ -794,7 +798,7 @@ class OrderManager:
             event="EXIT",
             symbol=symbol,
             side=position.side.value,
-            entry_price=position.entry_price,
+            entry_price=position.effective_entry_price,
             exit_price=exit_price,
             quantity=position.quantity,
             pnl=round(pnl, 2),
@@ -860,9 +864,10 @@ class OrderManager:
     # ------------------------------------------------------------
 
     def _compute_pnl(self, position: Position, exit_price: float) -> float:
+        entry = position.effective_entry_price
         if position.side == TradeSide.LONG:
-            return (exit_price - position.entry_price) * position.quantity
-        return (position.entry_price - exit_price) * position.quantity
+            return (exit_price - entry) * position.quantity
+        return (entry - exit_price) * position.quantity
 
     def _get_order_status(self, order_id: str) -> Optional[str]:
         try:
@@ -1287,13 +1292,18 @@ class OrderManager:
 
     def _fire_market_exit(self, symbol: str, position: Position, reason: str) -> None:
         transaction_type = "SELL" if position.side == TradeSide.LONG else "BUY"
-        fill_price = 0.0
-        if CONFIG.mode == TradingMode.PAPER:
-            ltp = self._get_ltp(symbol) if self._get_ltp else None
-            fill_price = ltp if ltp and ltp > 0 else position.entry_price
+        ltp = self._get_ltp(symbol)
+        if ltp is None or ltp <= 0:
+            ltp = position.effective_entry_price
+
+        buffer_pct = CONFIG.trade_mgmt.exit_limit_buffer_pct
+        limit_price = round(
+            ltp * (1 - buffer_pct) if position.side == TradeSide.LONG else ltp * (1 + buffer_pct),
+            2,
+        )
         _log.info(
-            "ORDER_REQUEST | symbol=%s transaction_type=%s quantity=%d order_type=MARKET price=%.2f trigger_price=None product=%s exchange=%s caller=_fire_market_exit reason=%s",
-            symbol, transaction_type, position.quantity, fill_price, CONFIG.capital.product_type, CONFIG.instrument.option_exchange, reason,
+            "ORDER_REQUEST | symbol=%s transaction_type=%s quantity=%d order_type=LIMIT price=%.2f trigger_price=None product=%s exchange=%s caller=_fire_limit_exit reason=%s",
+            symbol, transaction_type, position.quantity, limit_price, CONFIG.capital.product_type, CONFIG.instrument.option_exchange, reason,
         )
         try:
             order_id = self.kite.place_order(
@@ -1302,39 +1312,41 @@ class OrderManager:
                 transaction_type=transaction_type,
                 quantity=position.quantity,
                 product=CONFIG.capital.product_type,
-                order_type="MARKET",
-                price=fill_price,
+                order_type="LIMIT",
+                price=limit_price,
             )
         except Exception:
-            _log.exception("Failed to place market exit for %s", symbol)
+            _log.exception("Failed to place limit exit for %s", symbol)
             return
 
-        _log.info("Market exit order placed: %s reason=%s order_id=%s", symbol, reason, order_id)
+        _log.info("Limit exit order placed: %s reason=%s limit=%.2f order_id=%s", symbol, reason, limit_price, order_id)
 
         with self._lock:
             position.exit_order_id = order_id
+            position.exit_limit_order_id = order_id
             position.exit_reason = reason
             position.exit_requested_quantity = position.quantity
             position.exit_requested_at = datetime.now().isoformat()
-            position.state = PositionState.EXIT_MARKET_FALLBACK
-            position.exit_market_fallback_used = True
-            position.exit_fallback_quantity = position.quantity
+            position.exit_filled_quantity = 0
+            position.exit_remaining_quantity = position.quantity
+            position.state = PositionState.EXIT_LIMIT_PLACED
+            position.exit_fallback_used = False
             self._exit_order_ids[symbol] = order_id
 
         log_structured(
-            "EXIT_MARKET_FALLBACK",
+            "EXIT_LIMIT_PLACED",
             symbol=symbol,
             side=position.side.value,
             position_quantity=position.quantity,
             exit_reason=reason,
-            strategy_exit_price=round(position.entry_price, 2),
-            limit_price=None,
-            buffer_pct=CONFIG.trade_mgmt.exit_limit_buffer_pct,
-            limit_order_id=position.exit_limit_order_id,
+            strategy_exit_price=round(ltp, 2),
+            limit_price=limit_price,
+            buffer_pct=buffer_pct,
+            limit_order_id=order_id,
             filled_quantity=0,
             remaining_quantity=position.quantity,
             timeout_seconds=CONFIG.order.exit_limit_timeout_sec,
-            fallback_used=True,
+            fallback_used=False,
             final_exit_status="PENDING",
         )
 
@@ -1398,18 +1410,23 @@ class OrderManager:
             return
 
         transaction_type = "SELL" if position.side == TradeSide.LONG else "BUY"
+        ltp = self._get_ltp(symbol)
+        if ltp is None or ltp <= 0:
+            ltp = position.effective_entry_price
+        buffer_pct = CONFIG.trade_mgmt.exit_limit_buffer_pct
+        limit_price = round(
+            ltp * (1 - buffer_pct) if position.side == TradeSide.LONG else ltp * (1 + buffer_pct),
+            2,
+        )
         order_kwargs = dict(
             tradingsymbol=symbol,
             exchange=CONFIG.instrument.option_exchange,
             transaction_type=transaction_type,
             quantity=remaining,
             product=CONFIG.capital.product_type,
-            order_type="MARKET",
+            order_type="LIMIT",
+            price=limit_price,
         )
-        if CONFIG.mode == TradingMode.PAPER:
-            ltp = self._get_ltp(symbol) if self._get_ltp else None
-            if ltp and ltp > 0:
-                order_kwargs["price"] = round(ltp, 2)
         try:
             order_id = self.kite.place_order(**order_kwargs)
             with self._lock:
@@ -1419,31 +1436,31 @@ class OrderManager:
                 position.exit_requested_at = datetime.now().isoformat()
                 position.exit_filled_quantity = 0
                 position.exit_remaining_quantity = remaining
-                position.state = PositionState.EXIT_MARKET_FALLBACK
-                position.exit_market_fallback_used = True
+                position.state = PositionState.EXIT_LIMIT_PLACED
+                position.exit_fallback_used = False
                 position.exit_fallback_quantity = remaining
                 self._exit_order_ids[symbol] = order_id
 
             log_structured(
-                "EXIT_MARKET_FALLBACK",
+                "EXIT_LIMIT_PLACED",
                 symbol=symbol,
                 side=position.side.value,
                 position_quantity=position.quantity,
                 exit_reason=reason,
-                strategy_exit_price=round(position.exit_avg_price, 2) if position.exit_avg_price > 0 else round(position.entry_price, 2),
-                limit_price=None,
-                buffer_pct=CONFIG.trade_mgmt.exit_limit_buffer_pct,
+                strategy_exit_price=round(position.exit_avg_price, 2) if position.exit_avg_price > 0 else round(position.effective_entry_price, 2),
+                limit_price=limit_price,
+                buffer_pct=buffer_pct,
                 limit_order_id=position.exit_limit_order_id,
                 filled_quantity=0,
                 remaining_quantity=remaining,
                 timeout_seconds=CONFIG.order.exit_limit_timeout_sec,
-                fallback_used=True,
+                fallback_used=False,
                 final_exit_status="PENDING",
             )
         except Exception:
-            _log.exception("Failed to place MARKET fallback for %s", symbol)
+            _log.exception("Failed to place limit fallback for %s", symbol)
             with self._lock:
-                if position.state == PositionState.EXIT_MARKET_FALLBACK:
+                if position.state == PositionState.EXIT_LIMIT_PLACED:
                     position.state = PositionState.OPEN
                     position.exit_order_id = None
                     position.exit_limit_order_id = None

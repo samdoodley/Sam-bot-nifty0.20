@@ -93,6 +93,9 @@ class MarginManager:
         max_lots_by_margin = int(usable_margin // margin_per_lot_estimate) if margin_per_lot_estimate > 0 else 0
 
         max_lots = min(max_lots_by_risk, max_lots_by_margin, CONFIG.sizing.max_lots_per_trade)
+        if getattr(CONFIG.sizing, "use_fixed_quantity", False):
+            fixed_lots = int(getattr(CONFIG.sizing, "fixed_quantity_lots", 17))
+            max_lots = fixed_lots
 
         if max_lots <= 0:
             reason = "INSUFFICIENT_MARGIN" if max_lots_by_margin <= 0 else "RISK_LIMIT_TOO_TIGHT"

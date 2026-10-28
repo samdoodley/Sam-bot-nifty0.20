@@ -227,3 +227,8 @@ class Position:
     exit_market_fallback_used: bool = False
     exit_fallback_quantity: int = 0
     entry_requested_at: Optional[str] = None
+
+    @property
+    def effective_entry_price(self) -> float:
+        """Return actual fill price if filled, else signal price."""
+        return self.entry_avg_price if self.entry_avg_price > 0 else self.entry_price

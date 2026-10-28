@@ -230,7 +230,7 @@ class TradeManagementConfig:
     premium_target_points: float = 15.0
     premium_stop_loss_points: float = 12.0
 
-    sl_order_type: str = "SL-M"                # stop-market for guaranteed fill in live
+    sl_order_type: str = "SL"                # stop-loss limit for F&O (SL-M discontinued by exchange)
     sl_limit_offset_points: float = 2.0         # limit price = trigger +/- this
     sl_escalation_watchdog_sec: float = 5.0     # if SL-limit unfilled in this
                                                    # window, fire market exit
@@ -279,7 +279,9 @@ class TradeManagementConfig:
 class PositionSizingConfig:
     risk_per_trade_pct_of_equity: float = 3.0   # % of account equity risked per trade
     max_lots_per_trade: int = 17                 # hard ceiling regardless of margin (~1.1L at ~100 premium)
+    fixed_quantity_lots: int = 1                 # live test: 1 lot per trade
     round_lots_down: bool = True                  # never round up quantity
+    use_fixed_quantity: bool = True               # use fixed 17 lots for every trade
 
 
 # ============================================================
@@ -290,8 +292,9 @@ class PositionSizingConfig:
 class RiskConfig:
     daily_loss_limit_pct_of_equity: float = 1.0
     daily_profit_target_pct_of_equity: float = 2.0
-    stop_after_daily_loss_limit: bool = False
+    stop_after_daily_loss_limit: bool = True
     stop_after_daily_profit_target: bool = False
+    max_daily_loss_rupees: float = 5000.0   # hard per-day loss limit (paper + live)
 
 
 # ============================================================
@@ -300,13 +303,14 @@ class RiskConfig:
 
 @dataclass(frozen=True)
 class OrderConfig:
-    entry_order_type: str = "MARKET"
+    entry_order_type: str = "LIMIT"        # LIMIT only, no MARKET fallback
+    entry_limit_fallback_sec: float = 9999.0  # DISABLED - no LIMIT->MARKET conversion
     fill_confirmation_poll_interval_sec: float = 0.5
     fill_confirmation_timeout_sec: float = 10.0
     max_order_retries: int = 3
     reject_retry_backoff_sec: float = 2.0
     exit_limit_timeout_sec: float = 3.0
-    entry_fill_timeout_sec: float = 120.0
+    entry_fill_timeout_sec: float = 120.0  # cancel unfilled LIMIT after ~120s and retry with fresh LIMIT
 
 
 # ============================================================

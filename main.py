@@ -395,7 +395,7 @@ class TradingBot:
             self.margin_mgr.update_paper_equity(self.risk.equity)
         send_telegram_alert("POSITION_CLOSE", f"{symbol} pnl={result.pnl:.2f} reason={result.reason}")
         dashboard.update_state(
-            position=None, current_pnl=0, daily_pnl=round(self.risk.stats.realized_pnl, 2),
+            position=None, current_pnl=0, daily_pnl=round(self.risk._daily_pnl, 2),
             trades_today=self.risk.stats.trades_taken, win_rate=round(self.risk.win_rate(), 1),
         )
 
@@ -569,6 +569,14 @@ class TradingBot:
         positions = self.order_mgr.get_open_positions()
         pos = positions[0] if positions else None
 
+        current_pnl = 0.0
+        if pos:
+            current_premium = self._get_option_ltp(pos.contract.tradingsymbol) or pos.entry_price
+            if pos.side == TradeSide.LONG:
+                current_pnl = (current_premium - pos.entry_price) * pos.quantity
+            else:
+                current_pnl = (pos.entry_price - current_premium) * pos.quantity
+
         dashboard.update_state(
             nifty_spot=closes[-1] if closes else None,
             trend=("UP" if ema20 and ema50 and ema20 > ema50 else "DOWN" if ema20 and ema50 else None),
@@ -576,14 +584,15 @@ class TradingBot:
             ema50=round(ema50, 2) if ema50 else None,
             vwap=round(vwap, 2) if vwap else None,
             adx=round(adx_val, 2) if adx_val else None,
-            atr=round(atr_val, 2) if atr_val else None,
+            atr=round(atr_val, 2) if adx_val else None,
             position=pos.contract.tradingsymbol if pos else None,
             entry_price=pos.entry_price if pos else None,
             atm_strike=pos.contract.strike if pos else None,
             option_premium=self._get_option_ltp(pos.contract.tradingsymbol) if pos else None,
+            current_pnl=round(current_pnl, 2),
             available_margin=round(self.margin_mgr.get_available_margin(), 2),
             trades_today=self.risk.stats.trades_taken,
-            daily_pnl=round(self.risk.stats.realized_pnl, 2),
+            daily_pnl=round(self.risk._daily_pnl, 2),
             win_rate=round(self.risk.win_rate(), 1),
         )
 
@@ -617,7 +626,7 @@ class TradingBot:
         except Exception:
             _log.exception("Failed to save session state on shutdown")
         log_decision("BOT_SHUTDOWN", trades_today=self.risk.stats.trades_taken,
-                     daily_pnl=round(self.risk.stats.realized_pnl, 2))
+                     daily_pnl=round(self.risk._daily_pnl, 2))
         send_telegram_alert("BOT_SHUTDOWN", f"Trades={self.risk.stats.trades_taken} PnL={self.risk.stats.realized_pnl:.2f}")
         sys.exit(0)
 
