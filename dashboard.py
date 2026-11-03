@@ -28,9 +28,13 @@ _state: dict[str, Any] = {
     "nifty_spot": None, "atm_strike": None, "option_premium": None,
     "trend": None, "ema20": None, "ema50": None, "vwap": None,
     "adx": None, "atr": None, "signal": None,
-    "position": None, "entry_price": None, "current_pnl": None,
-    "daily_pnl": None, "available_margin": None, "margin_used": None,
+    "position": None, "entry_price": None, "current_pnl": None, "index_points": None,
+    "daily_pnl": None, "daily_gross_profit": None, "daily_gross_loss": None,
+    "daily_trades": None, "daily_wins": None, "daily_losses": None,
+    "available_margin": None, "margin_used": None,
     "trades_today": None, "win_rate": None,
+    "monthly_pnl": None, "monthly_gross_profit": None, "monthly_gross_loss": None,
+    "monthly_trades": None,
     "mode": "PAPER (Live Data)" if CONFIG.mode.value == "PAPER" else CONFIG.mode.value,
 }
 
@@ -53,6 +57,9 @@ h1{color:#37f26b;border-bottom:1px solid #37f26b;padding-bottom:8px;}
 table{width:100%;border-collapse:collapse;margin-top:10px;}
 td{padding:6px 10px;border-bottom:1px solid #123;}
 td.label{color:#7fdc9a;width:220px;}
+td.profit{color:#37f26b;font-weight:bold;}
+td.loss{color:#ff4d4d;font-weight:bold;}
+td.neutral{color:#ffeb3b;}
 .decisions{margin-top:24px;max-height:400px;overflow-y:auto;font-size:12px;white-space:pre-wrap;}
 </style></head>
 <body>
@@ -75,7 +82,13 @@ async function refresh() {
   t.innerHTML = '';
   for (const [k, v] of Object.entries(data)) {
     const row = document.createElement('tr');
-    row.innerHTML = `<td class="label">${k}</td><td>${v === null || v === undefined ? '-' : v}</td>`;
+    let cellClass = '';
+    const pnlKeys = ['current_pnl','index_points','daily_pnl','daily_gross_profit','daily_gross_loss','monthly_pnl','monthly_gross_profit','monthly_gross_loss'];
+    if (pnlKeys.includes(k)) {
+      const nv = parseFloat(v);
+      cellClass = nv > 0 ? 'profit' : (nv < 0 ? 'loss' : 'neutral');
+    }
+    row.innerHTML = `<td class="label">${k}</td><td class="${cellClass}">${v === null || v === undefined ? '-' : v}</td>`;
     t.appendChild(row);
   }
   const dres = await fetch('/api/decisions');

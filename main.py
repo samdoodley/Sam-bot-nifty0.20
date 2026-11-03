@@ -81,6 +81,8 @@ class TradingBot:
         self._last_daily_report_date: str | None = None
         self._last_session_save: float = 0.0
         self._margin_blocked: bool = False
+        self._adx_block_day: bool = False
+        self._adx_checked_1230: bool = False
 
     # ------------------------------------------------------------
     # STARTUP
@@ -257,6 +259,22 @@ class TradingBot:
 
         self._update_dashboard_indicators(closed_5m)
 
+        # ADX day-block: at 12:30 PM IST (Session 1 only), check ADX once.
+        # If ADX >= block threshold, stop all new entries for the day.
+        if not self._adx_checked_1230 and _get_current_session() == 1:
+            adx_val = ind.adx(closed_5m, CONFIG.indicators.adx_period)
+            if adx_val is not None and adx_val >= CONFIG.strategy.adx_block_threshold_at_1230:
+                self._adx_block_day = True
+                _log.info(
+                    "ADX_DAY_BLOCK | adx=%.1f threshold=%.1f at 12:30 IST - stopping new entries for the day",
+                    adx_val, CONFIG.strategy.adx_block_threshold_at_1230,
+                )
+            self._adx_checked_1230 = True
+
+        if self._adx_block_day:
+            _log.debug("ADX_DAY_BLOCKED - stopping new entries for the day")
+            return
+
         if is_force_square_off_time():
             return  # position_monitor_loop handles the actual square-off
 
@@ -284,6 +302,16 @@ class TradingBot:
 
         signal = self.strategy.evaluate(closed_5m, closed_15m, vwap_series, symbol="NIFTY")
         if signal.side in (TradeSide.LONG, TradeSide.SHORT):
+            session = _get_current_session()
+            session_target = CONFIG.strategy.session_profit_target.get(session, 0)
+            if session_target > 0:
+                session_realized = self.risk.stats.session_pnl.get(session, 0.0)
+                if session_realized >= session_target:
+                    _log.info(
+                        "SESSION_TARGET_MET | session=%d realized=%.2f target=%.2f - blocking new entries for this session",
+                        session, session_realized, session_target,
+                    )
+                    return
             if CONFIG.session.enable_time_based_entry_gate and now_ist_time() < CONFIG.session.first_entry_time:
                 return
             self._execute_signal(signal)
@@ -350,6 +378,22 @@ class TradingBot:
         # margin required ~= premium * lot_size for a long option buy.
         return max(premium, 0.05) * contract.lot_size
 
+    def _get_dashboard_pnl_fields(self) -> dict:
+        today = daily_report.get_today_summary()
+        monthly = daily_report.get_monthly_summary()
+        return {
+            "daily_pnl": round(self.risk._daily_pnl, 2),
+            "daily_gross_profit": today.get("gross_profit", 0.0),
+            "daily_gross_loss": today.get("gross_loss", 0.0),
+            "daily_trades": today.get("trades_count", 0),
+            "daily_wins": today.get("wins", 0),
+            "daily_losses": today.get("losses", 0),
+            "monthly_pnl": monthly.get("net_pnl", 0.0),
+            "monthly_gross_profit": monthly.get("gross_profit", 0.0),
+            "monthly_gross_loss": monthly.get("gross_loss", 0.0),
+            "monthly_trades": monthly.get("trades_count", 0),
+        }
+
     # ------------------------------------------------------------
     # POSITION MONITOR LOOP (exits - runs independently of entry scan)
     # ------------------------------------------------------------
@@ -359,33 +403,34 @@ class TradingBot:
             try:
                 self.order_mgr.monitor_positions()
 
-                # Check if session profit target was hit - force close open positions
-                session = _get_current_session()
-                session_profit_target = CONFIG.strategy.session_profit_target.get(session, 0)
-                if session_profit_target > 0:
-                    realized = self.risk.stats.session_pnl.get(session, 0.0)
-
-                    # Check unrealized PnL on open positions for exact lock
-                    open_positions = self.order_mgr.get_open_positions()
-                    for pos in open_positions:
-                        ltp = self.order_mgr._get_ltp(pos.contract.tradingsymbol)
-                        if ltp is None or ltp <= 0:
-                            continue
-                        if pos.side == TradeSide.LONG:
-                            unrealized = (ltp - pos.entry_price) * pos.quantity
-                        else:
-                            unrealized = (pos.entry_price - ltp) * pos.quantity
-                        total = realized + unrealized
-                        if total >= session_profit_target:
-                            _log.info(
-                                "SESSION_PROFIT_TARGET_HIT | session=%d realized=%.2f unrealized=%.2f total=%.2f target=%.2f - force closing position",
-                                session, realized, unrealized, total, session_profit_target,
-                            )
-                            self.order_mgr.force_square_off_all()
-                            break
-
                 if is_force_square_off_time():
                     self.order_mgr.force_square_off_all()
+
+                # Update dashboard with live P&L on every position monitor tick
+                open_positions = self.order_mgr.get_open_positions()
+                pos = open_positions[0] if open_positions else None
+                live_current_pnl = 0.0
+                live_index_points = 0.0
+                if pos:
+                    ltp = self.order_mgr._get_ltp(pos.contract.tradingsymbol)
+                    if ltp is None or ltp <= 0:
+                        ltp = pos.entry_price
+                    if pos.side == TradeSide.LONG:
+                        live_current_pnl = (ltp - pos.entry_price) * pos.quantity
+                        live_index_points = ltp - pos.entry_price
+                    else:
+                        live_current_pnl = (pos.entry_price - ltp) * pos.quantity
+                        live_index_points = pos.entry_price - ltp
+                dashboard.update_state(
+                    position=pos.contract.tradingsymbol if pos else None,
+                    entry_price=pos.entry_price if pos else None,
+                    option_premium=ltp if pos else None,
+                    current_pnl=round(live_current_pnl, 2),
+                    index_points=round(live_index_points, 2),
+                    **self._get_dashboard_pnl_fields(),
+                    trades_today=self.risk.stats.trades_taken,
+                    win_rate=round(self.risk.win_rate(), 1),
+                )
             except Exception:
                 _log.exception("Unhandled error in position monitor loop - continuing.")
             _time.sleep(CONFIG.session.position_monitor_interval_sec)
@@ -398,7 +443,7 @@ class TradingBot:
             self.margin_mgr.update_paper_equity(self.risk.equity)
         send_telegram_alert("POSITION_CLOSE", f"{symbol} pnl={result.pnl:.2f} reason={result.reason}")
         dashboard.update_state(
-            position=None, current_pnl=0, daily_pnl=round(self.risk._daily_pnl, 2),
+            position=None, current_pnl=0, index_points=0, **self._get_dashboard_pnl_fields(),
             trades_today=self.risk.stats.trades_taken, win_rate=round(self.risk.win_rate(), 1),
         )
 
@@ -573,12 +618,15 @@ class TradingBot:
         pos = positions[0] if positions else None
 
         current_pnl = 0.0
+        index_points = 0.0
         if pos:
             current_premium = self._get_option_ltp(pos.contract.tradingsymbol) or pos.entry_price
             if pos.side == TradeSide.LONG:
                 current_pnl = (current_premium - pos.entry_price) * pos.quantity
+                index_points = current_premium - pos.entry_price
             else:
                 current_pnl = (pos.entry_price - current_premium) * pos.quantity
+                index_points = pos.entry_price - current_premium
 
         dashboard.update_state(
             nifty_spot=closes[-1] if closes else None,
@@ -593,9 +641,10 @@ class TradingBot:
             atm_strike=pos.contract.strike if pos else None,
             option_premium=self._get_option_ltp(pos.contract.tradingsymbol) if pos else None,
             current_pnl=round(current_pnl, 2),
+            index_points=round(index_points, 2),
             available_margin=round(self.margin_mgr.get_available_margin(), 2),
             trades_today=self.risk.stats.trades_taken,
-            daily_pnl=round(self.risk._daily_pnl, 2),
+            **self._get_dashboard_pnl_fields(),
             win_rate=round(self.risk.win_rate(), 1),
         )
 

@@ -83,7 +83,7 @@ def _get_trade_data() -> dict[str, Any]:
         symbol = e.get("symbol", "-")
         side = e.get("side", "-")
         qty = e.get("quantity", "-")
-        price = e.get("entry_price", e.get("sl_trigger", e.get("fill_price", e.get("avg_price", "-"))))
+        price = e.get("fill_price", e.get("exit_price", e.get("avg_price", e.get("sl_trigger", e.get("entry_price", "-")))))
         pnl = e.get("pnl", "-")
         reason = e.get("reason", "")
         order_id = e.get("order_id", e.get("sl_order_id", e.get("exit_order_id", "-")))

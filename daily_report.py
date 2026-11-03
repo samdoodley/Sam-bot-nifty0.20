@@ -172,6 +172,52 @@ def send_daily_report_telegram() -> None:
     send_telegram_alert("DAILY_REPORT", text)
 
 
+def get_today_summary() -> dict:
+    """Return today's trade summary with gross_profit and gross_loss."""
+    report = build_daily_report()
+    today_str = datetime.now().date().isoformat()
+    return report.get(today_str, {
+        "date": today_str,
+        "trades_count": 0,
+        "wins": 0,
+        "losses": 0,
+        "net_pnl": 0.0,
+        "win_rate_pct": 0.0,
+        "gross_profit": 0.0,
+        "gross_loss": 0.0,
+        "trades": [],
+    })
+
+
+def get_monthly_summary() -> dict:
+    """Return current month's aggregated P&L from all daily reports."""
+    report = build_daily_report()
+    current_month = datetime.now().date().strftime("%Y-%m")
+    month_net_pnl = 0.0
+    month_gross_profit = 0.0
+    month_gross_loss = 0.0
+    month_trades = 0
+    month_wins = 0
+    month_losses = 0
+    for date_str, summary in report.items():
+        if date_str.startswith(current_month):
+            month_net_pnl += summary.get("net_pnl", 0.0)
+            month_gross_profit += summary.get("gross_profit", 0.0)
+            month_gross_loss += summary.get("gross_loss", 0.0)
+            month_trades += summary.get("trades_count", 0)
+            month_wins += summary.get("wins", 0)
+            month_losses += summary.get("losses", 0)
+    return {
+        "month": current_month,
+        "trades_count": month_trades,
+        "wins": month_wins,
+        "losses": month_losses,
+        "net_pnl": round(month_net_pnl, 2),
+        "gross_profit": round(month_gross_profit, 2),
+        "gross_loss": round(month_gross_loss, 2),
+    }
+
+
 def main() -> None:
     csv_path, json_dir = save_daily_report()
     send_daily_report_telegram()

@@ -57,6 +57,9 @@ def get_logger(name: str) -> logging.Logger:
     return logger
 
 
+_log = get_logger("logger")
+
+
 def log_decision(event: str, **fields: Any) -> None:
     """
     Append one structured decision record to decisions.jsonl.

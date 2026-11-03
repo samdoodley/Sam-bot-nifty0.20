@@ -178,11 +178,15 @@ class StrategyConfig:
 
     manual_event_disable: bool = False      # flip True on RBI policy / budget days etc.
 
+    # ADX day-block: at 12:30 PM IST (Session 1 only), check ADX once.
+    # If ADX >= block_threshold, block all new entries for the day (stop trading).
+    adx_block_threshold_at_1230: float = 35.0   # block if ADX >= 35 at 12:30 PM
+
     # Per-session ADX/ATR thresholds (override defaults when set)
     # Session boundaries in IST: S1=12:30-13:50, S2=13:50-14:20, S3=14:20-15:00, S4=15:00-15:25
     session_adx_min: dict = field(default_factory=lambda: {
-        1: 20.0,   # Session 1: ADX >= 20
-        2: 20.0,   # Session 2: ADX >= 20
+        1: 22.0,   # Session 1: ADX >= 22
+        2: 22.0,   # Session 2: ADX >= 22
         3: 25.0,   # Session 3: ADX >= 25
         4: 30.0,   # Session 4: ADX >= 30
     })
@@ -279,7 +283,7 @@ class TradeManagementConfig:
 class PositionSizingConfig:
     risk_per_trade_pct_of_equity: float = 3.0   # % of account equity risked per trade
     max_lots_per_trade: int = 17                 # hard ceiling regardless of margin (~1.1L at ~100 premium)
-    fixed_quantity_lots: int = 1                 # live test: 1 lot per trade
+    fixed_quantity_lots: int = 17                 # force fixed lot size per trade
     round_lots_down: bool = True                  # never round up quantity
     use_fixed_quantity: bool = True               # use fixed 17 lots for every trade
 
@@ -294,7 +298,7 @@ class RiskConfig:
     daily_profit_target_pct_of_equity: float = 2.0
     stop_after_daily_loss_limit: bool = True
     stop_after_daily_profit_target: bool = False
-    max_daily_loss_rupees: float = 5000.0   # hard per-day loss limit (paper + live)
+    max_daily_loss_rupees: float = 25000.0   # hard per-day loss limit (paper + live)
 
 
 # ============================================================

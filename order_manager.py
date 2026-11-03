@@ -894,7 +894,12 @@ class OrderManager:
                 return
             position.finalized = True
 
-        exit_price = position.exit_avg_price if position.exit_avg_price > 0 else position.effective_entry_price
+        if position.exit_avg_price > 0:
+            exit_price = position.exit_avg_price
+        elif position.stop_loss > 0:
+            exit_price = position.stop_loss
+        else:
+            exit_price = position.effective_entry_price
         pnl = self._compute_pnl(position, exit_price)
         result = ExitResult(pnl=pnl, reason=position.exit_reason or "CLOSED", exit_price=exit_price)
 
@@ -1108,6 +1113,10 @@ class OrderManager:
                 with self._lock:
                     position.state = PositionState.CLOSED
                     position.was_ever_filled = True
+                    recovered, sl_price = self._try_recover_sl_fill_price(symbol, position)
+                    if recovered:
+                        position.exit_avg_price = sl_price
+                        position.exit_reason = "SL_FILLED"
                 position.last_reconciled_at = datetime.now().isoformat()
                 _log.info("Reconciliation: %s SL filled during entry -> CLOSED", symbol)
             elif exit_filled:
@@ -1137,6 +1146,11 @@ class OrderManager:
             elif sl_filled:
                 with self._lock:
                     position.state = PositionState.CLOSED
+                    position.was_ever_filled = True
+                    recovered, sl_price = self._try_recover_sl_fill_price(symbol, position)
+                    if recovered:
+                        position.exit_avg_price = sl_price
+                        position.exit_reason = "SL_FILLED"
                 position.last_reconciled_at = datetime.now().isoformat()
                 _log.info("Reconciliation: %s SL filled -> CLOSED", symbol)
             elif exit_pending:
@@ -1162,6 +1176,11 @@ class OrderManager:
             if sl_filled:
                 with self._lock:
                     position.state = PositionState.CLOSED
+                    position.was_ever_filled = True
+                    recovered, sl_price = self._try_recover_sl_fill_price(symbol, position)
+                    if recovered:
+                        position.exit_avg_price = sl_price
+                        position.exit_reason = "SL_FILLED"
                 position.last_reconciled_at = datetime.now().isoformat()
                 _log.info("Reconciliation: %s SL filled -> CLOSED", symbol)
                 return
@@ -1250,14 +1269,19 @@ class OrderManager:
         if sl_status in ("COMPLETE", "FILLED"):
             _log.info("SL_WATCHDOG_OK | symbol=%s | SL filled -> reconcile", symbol)
 
+            fill_price = position.exit_avg_price if position.exit_avg_price > 0 else position.stop_loss
+            if position.side == TradeSide.LONG:
+                sl_pnl = (fill_price - position.effective_entry_price) * position.quantity
+            else:
+                sl_pnl = (position.effective_entry_price - fill_price) * position.quantity
             log_sl_filled(
                 symbol=symbol,
                 side=position.side.value,
                 quantity=position.quantity,
                 sl_trigger=position.stop_loss,
-                fill_price=position.exit_avg_price if position.exit_avg_price > 0 else position.stop_loss,
+                fill_price=fill_price,
                 sl_order_id=sl_order_id,
-                pnl=0.0,
+                pnl=round(sl_pnl, 2),
                 reason="SL_FILLED",
                 entry_price=position.entry_price,
             )
