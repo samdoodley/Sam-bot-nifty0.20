@@ -899,7 +899,29 @@ class OrderManager:
         elif position.stop_loss > 0:
             exit_price = position.stop_loss
         else:
-            exit_price = position.effective_entry_price
+            ltp = self._get_ltp(symbol) if self._get_ltp else None
+            if ltp and ltp > 0:
+                exit_price = ltp
+                _log.warning("FINALIZE_LTP_FALLBACK | symbol=%s | exit_avg_price=0 stop_loss=0 using ltp=%.2f", symbol, ltp)
+            else:
+                exit_price = position.effective_entry_price
+                _log.warning("FINALIZE_ENTRY_FALLBACK | symbol=%s | no exit price available, using entry=%.2f PnL will be 0", symbol, position.effective_entry_price)
+
+        # Zero-PnL guard: if exit resolves to entry price on an SL/stop-loss exit,
+        # fall back to stop_loss so PnL reflects the actual stop level
+        if (
+            exit_price == position.effective_entry_price
+            and position.stop_loss > 0
+            and position.stop_loss != position.effective_entry_price
+        ):
+            exit_reason_upper = (position.exit_reason or "").upper()
+            if "SL" in exit_reason_upper or "STOP_LOSS" in exit_reason_upper:
+                old_exit = exit_price
+                exit_price = position.stop_loss
+                _log.warning(
+                    "FINALIZE_SL_EXIT_PRICE_OVERRIDE | symbol=%s | exit_price=entry=%.2f -> stop_loss=%.2f",
+                    symbol, old_exit, exit_price,
+                )
         pnl = self._compute_pnl(position, exit_price)
         result = ExitResult(pnl=pnl, reason=position.exit_reason or "CLOSED", exit_price=exit_price)
 
@@ -1467,7 +1489,12 @@ class OrderManager:
         transaction_type = "SELL" if position.side == TradeSide.LONG else "BUY"
         ltp = self._get_ltp(symbol)
         if ltp is None or ltp <= 0:
-            ltp = position.effective_entry_price
+            if position.stop_loss > 0:
+                ltp = position.stop_loss
+                _log.warning("FIRE_MARKET_SL_FALLBACK | symbol=%s | LTP unavailable, using stop_loss=%.2f as exit price", symbol, ltp)
+            else:
+                ltp = position.effective_entry_price
+                _log.warning("FIRE_MARKET_ENTRY_FALLBACK | symbol=%s | no LTP or stop_loss, using entry=%.2f — PnL will be 0", symbol, ltp)
 
         buffer_pct = CONFIG.trade_mgmt.exit_limit_buffer_pct
         limit_price = round(
@@ -1585,7 +1612,12 @@ class OrderManager:
         transaction_type = "SELL" if position.side == TradeSide.LONG else "BUY"
         ltp = self._get_ltp(symbol)
         if ltp is None or ltp <= 0:
-            ltp = position.effective_entry_price
+            if position.stop_loss > 0:
+                ltp = position.stop_loss
+                _log.warning("MARKET_FALLBACK_SL_FALLBACK | symbol=%s | LTP unavailable, using stop_loss=%.2f as exit price", symbol, ltp)
+            else:
+                ltp = position.effective_entry_price
+                _log.warning("MARKET_FALLBACK_ENTRY_FALLBACK | symbol=%s | no LTP or stop_loss, using entry=%.2f — PnL will be 0", symbol, ltp)
         buffer_pct = CONFIG.trade_mgmt.exit_limit_buffer_pct
         limit_price = round(
             ltp * (1 - buffer_pct) if position.side == TradeSide.LONG else ltp * (1 + buffer_pct),
