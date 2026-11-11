@@ -170,8 +170,8 @@ class StrategyConfig:
 
     # Per-session profit target in rupees (0 = disabled)
     session_profit_target: dict = field(default_factory=lambda: {
-        1: 2500,  # Session 1: stop after Rs.2,500 profit
-        2: 2500,  # Session 2: stop after Rs.2,500 profit
+        1: 3500,  # Session 1: stop after Rs.3,500 profit
+        2: 3500,  # Session 2: stop after Rs.3,500 profit
         3: 0,     # Session 3: disabled
         4: 0,     # Session 4: disabled
     })
@@ -276,16 +276,16 @@ class TradeManagementConfig:
 
 
 # ============================================================
-# POSITION SIZING / MARGIN
+    # POSITION SIZING / MARGIN
 # ============================================================
 
 @dataclass(frozen=True)
 class PositionSizingConfig:
     risk_per_trade_pct_of_equity: float = 3.0   # % of account equity risked per trade
-    max_lots_per_trade: int = 17                 # hard ceiling regardless of margin (~1.1L at ~100 premium)
-    fixed_quantity_lots: int = 17                 # force fixed lot size per trade
+    max_lots_per_trade: int = 1                  # hard ceiling: 1 lot for live testing
+    fixed_quantity_lots: int = 1                 # force fixed 1 lot per trade
     round_lots_down: bool = True                  # never round up quantity
-    use_fixed_quantity: bool = True               # use fixed 17 lots for every trade
+    use_fixed_quantity: bool = True               # use fixed 1 lot for every trade
 
 
 # ============================================================

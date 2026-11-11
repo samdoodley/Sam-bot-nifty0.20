@@ -84,7 +84,8 @@ class OrderManager:
             _log.warning("Cannot enter %s — LTP is 0 or unavailable", contract.tradingsymbol)
             return
 
-        transaction_type = "BUY" if side == TradeSide.LONG else "SELL"
+        # Entry: always BUY options (LONG -> buy CE, SHORT -> buy PE). Never sell/write.
+        transaction_type = "BUY"
 
         position = Position(
             contract=contract,
@@ -244,23 +245,17 @@ class OrderManager:
         reason = ""
         exit_price = ltp
 
-        # Calculate profit
-        profit = (
-            ltp - position.effective_entry_price
-            if position.side == TradeSide.LONG
-            else position.effective_entry_price - ltp
-        )
+        # Calculate profit (option buying: both CE and PE are bought, so profit = ltp - entry)
+        profit = ltp - position.effective_entry_price
 
         # Config-driven trailing SL ladder (premium points)
         # CONFIG.trade_mgmt.trailing_sl_ladder = [(profit_trigger, lock_profit), ...]
+        # Both LONG (CE buy) and SHORT (PE buy) are option buys: trail SL upward
         if position.initial_sl > 0:
             new_sl_trigger = None
             for trigger, lock in CONFIG.trade_mgmt.trailing_sl_ladder:
                 if profit >= trigger:
-                    if position.side == TradeSide.LONG:
-                        new_sl_trigger = position.effective_entry_price + lock
-                    else:
-                        new_sl_trigger = position.effective_entry_price - lock
+                    new_sl_trigger = position.effective_entry_price + lock
                 else:
                     break
 
@@ -269,27 +264,14 @@ class OrderManager:
                 position.trailing_sl_active = True
                 if position.sl_order_id:
                     threshold = CONFIG.trade_mgmt.sl_m_slippage_points
-                    if position.side == TradeSide.LONG:
-                        if new_sl_trigger > position.last_sl_trigger + threshold:
-                            self._cancel_sl_order(symbol, position)
-                            self._place_sl_m_order(symbol, position, new_sl_trigger)
-                    else:
-                        if new_sl_trigger < position.last_sl_trigger - threshold:
-                            self._cancel_sl_order(symbol, position)
-                            self._place_sl_m_order(symbol, position, new_sl_trigger)
+                    if new_sl_trigger > position.last_sl_trigger + threshold:
+                        self._cancel_sl_order(symbol, position)
+                        self._place_sl_m_order(symbol, position, new_sl_trigger)
 
-        if position.side == TradeSide.LONG:
-            # When target is hit, don't exit immediately - let trailing SL take over
-            # The step-based trailing logic above has already moved the SL
-            if ltp <= position.stop_loss:
-                self._cancel_sl_and_market_exit(symbol, position, "STOP_LOSS_TOUCH")
-                return
-        else:
-            # When target is hit, don't exit immediately - let trailing SL take over
-            # The step-based trailing logic above has already moved the SL
-            if ltp >= position.stop_loss:
-                self._cancel_sl_and_market_exit(symbol, position, "STOP_LOSS_TOUCH")
-                return
+        # SL touch: for bought options, exit when premium falls to stop_loss
+        if ltp <= position.stop_loss:
+            self._cancel_sl_and_market_exit(symbol, position, "STOP_LOSS_TOUCH")
+            return
 
         if should_exit:
             self._close_position(symbol, position, exit_price, reason)
@@ -303,10 +285,8 @@ class OrderManager:
             if not position.sl_order_id:
                 lock = CONFIG.trade_mgmt.immediate_trail_lock_points
                 if lock > 0:
-                    if position.side == TradeSide.LONG:
-                        position.stop_loss = max(position.stop_loss, position.effective_entry_price + lock)
-                    else:
-                        position.stop_loss = min(position.stop_loss, position.effective_entry_price - lock)
+                    # Option buy (CE or PE): trail SL upward above entry
+                    position.stop_loss = max(position.stop_loss, position.effective_entry_price + lock)
                     _log.info("IMMEDIATE_SL_LOCK | symbol=%s | side=%s | new_sl=%.2f | lock_points=%.1f",
                               symbol, position.side.value, position.stop_loss, lock)
                 self._place_sl_order(symbol, position)
@@ -412,13 +392,10 @@ class OrderManager:
 
                 lock = CONFIG.trade_mgmt.immediate_trail_lock_points
                 if lock > 0:
-                    if position.side == TradeSide.LONG:
-                        position.stop_loss = max(position.stop_loss, position.effective_entry_price + lock)
-                    else:
-                        position.stop_loss = min(position.stop_loss, position.effective_entry_price - lock)
+                    # Option buy (CE or PE): trail SL upward above entry
+                    position.stop_loss = max(position.stop_loss, position.effective_entry_price + lock)
                     _log.info("IMMEDIATE_SL_LOCK | symbol=%s | side=%s | new_sl=%.2f | lock_points=%.1f",
                               symbol, position.side.value, position.stop_loss, lock)
-
                 self._place_sl_order(symbol, position)
 
                 with self._lock:
@@ -480,13 +457,11 @@ class OrderManager:
             _log.exception("Error checking entry order %s for %s", entry_order_id, symbol)
 
     def _place_sl_order(self, symbol: str, position: Position) -> None:
+        # SL for bought options (CE or PE): sell to exit when premium falls to trigger
         sl_offset = CONFIG.trade_mgmt.sl_limit_offset_points
-        if position.side == TradeSide.LONG:
-            sl_trigger = position.stop_loss
-            sl_limit = sl_trigger + sl_offset
-        else:
-            sl_trigger = position.stop_loss
-            sl_limit = sl_trigger - sl_offset
+        sl_trigger = position.stop_loss
+        sl_limit = sl_trigger - sl_offset  # sell below trigger for fill
+        txn = "SELL"
 
         order_type = CONFIG.trade_mgmt.sl_order_type
 
@@ -494,12 +469,12 @@ class OrderManager:
             if order_type == "SL-M":
                 _log.info(
                     "ORDER_REQUEST | symbol=%s transaction_type=%s quantity=%d order_type=SL-M trigger_price=%.2f product=%s exchange=%s caller=_place_sl_order",
-                    symbol, "SELL" if position.side == TradeSide.LONG else "BUY", position.quantity, sl_trigger, CONFIG.capital.product_type, CONFIG.instrument.option_exchange,
+                    symbol, txn, position.quantity, sl_trigger, CONFIG.capital.product_type, CONFIG.instrument.option_exchange,
                 )
                 sl_order_id = self.kite.place_order(
                     tradingsymbol=symbol,
                     exchange=CONFIG.instrument.option_exchange,
-                    transaction_type="SELL" if position.side == TradeSide.LONG else "BUY",
+                    transaction_type=txn,
                     quantity=position.quantity,
                     product=CONFIG.capital.product_type,
                     order_type="SL-M",
@@ -508,12 +483,12 @@ class OrderManager:
             else:
                 _log.info(
                     "ORDER_REQUEST | symbol=%s transaction_type=%s quantity=%d order_type=SL price=%.2f trigger_price=%.2f product=%s exchange=%s caller=_place_sl_order",
-                    symbol, "SELL" if position.side == TradeSide.LONG else "BUY", position.quantity, sl_limit, sl_trigger, CONFIG.capital.product_type, CONFIG.instrument.option_exchange,
+                    symbol, txn, position.quantity, sl_limit, sl_trigger, CONFIG.capital.product_type, CONFIG.instrument.option_exchange,
                 )
                 sl_order_id = self.kite.place_order(
                     tradingsymbol=symbol,
                     exchange=CONFIG.instrument.option_exchange,
-                    transaction_type="SELL" if position.side == TradeSide.LONG else "BUY",
+                    transaction_type=txn,
                     quantity=position.quantity,
                     product=CONFIG.capital.product_type,
                     order_type="SL",
@@ -613,7 +588,8 @@ class OrderManager:
             )
 
     def _place_sl_m_order(self, symbol: str, position: Position, trigger_price: float) -> None:
-        transaction_type = "SELL" if position.side == TradeSide.LONG else "BUY"
+        """Place a SL-M order for trailing stop-loss (option buys: sell to exit)."""
+        transaction_type = "SELL"
         try:
             _log.info(
                 "ORDER_REQUEST | symbol=%s transaction_type=%s quantity=%d order_type=SL-M trigger_price=%.2f product=%s exchange=%s caller=_place_sl_m_order",
@@ -726,12 +702,11 @@ class OrderManager:
                         _log.info("Exit already pending for %s order_id=%s", symbol, position.exit_order_id)
                         return
 
-            transaction_type = "SELL" if position.side == TradeSide.LONG else "BUY"
+            # Exit for bought options (CE or PE): sell to close
+            transaction_type = "SELL"
             buffer_pct = CONFIG.trade_mgmt.exit_limit_buffer_pct
-            limit_price = round(
-                exit_price * (1 - buffer_pct) if position.side == TradeSide.LONG else exit_price * (1 + buffer_pct),
-                2,
-            )
+            # Sell below exit price for fill
+            limit_price = round(exit_price * (1 - buffer_pct), 2)
             _log.info(
                 "ORDER_REQUEST | symbol=%s transaction_type=%s quantity=%d order_type=LIMIT price=%.2f trigger_price=None product=%s exchange=%s caller=_close_position reason=%s",
                 symbol, transaction_type, position.quantity, limit_price, CONFIG.capital.product_type, CONFIG.instrument.option_exchange, reason,
@@ -1027,10 +1002,9 @@ class OrderManager:
     # ------------------------------------------------------------
 
     def _compute_pnl(self, position: Position, exit_price: float) -> float:
+        # PnL for bought options (CE or PE): always (exit - entry) * qty
         entry = position.effective_entry_price
-        if position.side == TradeSide.LONG:
-            return (exit_price - entry) * position.quantity
-        return (entry - exit_price) * position.quantity
+        return (exit_price - entry) * position.quantity
 
     def _get_order_status(self, order_id: str) -> Optional[str]:
         try:
@@ -1292,10 +1266,8 @@ class OrderManager:
             _log.info("SL_WATCHDOG_OK | symbol=%s | SL filled -> reconcile", symbol)
 
             fill_price = position.exit_avg_price if position.exit_avg_price > 0 else position.stop_loss
-            if position.side == TradeSide.LONG:
-                sl_pnl = (fill_price - position.effective_entry_price) * position.quantity
-            else:
-                sl_pnl = (position.effective_entry_price - fill_price) * position.quantity
+            # PnL for bought options (CE or PE): (exit - entry) * qty
+            sl_pnl = (fill_price - position.effective_entry_price) * position.quantity
             log_sl_filled(
                 symbol=symbol,
                 side=position.side.value,
@@ -1368,7 +1340,8 @@ class OrderManager:
     def _validate_sl_order(self, symbol: str, position: Position, details: dict) -> bool:
         """Validate the protective SL order. Returns True if OK (or not enough
         data to judge). Returns False if a repair was attempted."""
-        expected_txn = "SELL" if position.side == TradeSide.LONG else "BUY"
+        # Option buys (CE or PE): SL exit is always SELL
+        expected_txn = "SELL"
 
         if details.get("tradingsymbol") and details.get("tradingsymbol") != symbol:
             _log.warning("SL_WATCHDOG_REPAIR_REQUIRED | symbol=%s | reason=SL_WRONG_SYMBOL actual=%s", symbol, details.get("tradingsymbol"))
@@ -1402,25 +1375,19 @@ class OrderManager:
             order_trigger = float(trig)
         except (TypeError, ValueError):
             return
-        if position.side == TradeSide.LONG:
-            if order_trigger < position.stop_loss - 1e-6:
-                _log.warning("SL_WATCHDOG_REPAIR_REQUIRED | symbol=%s | reason=SL_TRAILING_BEHIND order_trigger=%.2f current_sl=%.2f", symbol, order_trigger, position.stop_loss)
-                new_trigger = round(position.stop_loss, 2)
-                self._cancel_sl_order(symbol, position)
-                self._place_sl_m_order(symbol, position, new_trigger)
-        else:
-            if order_trigger > position.stop_loss + 1e-6:
-                _log.warning("SL_WATCHDOG_REPAIR_REQUIRED | symbol=%s | reason=SL_TRAILING_BEHIND order_trigger=%.2f current_sl=%.2f", symbol, order_trigger, position.stop_loss)
-                new_trigger = round(position.stop_loss, 2)
-                self._cancel_sl_order(symbol, position)
-                self._place_sl_m_order(symbol, position, new_trigger)
+        # Bought options (CE or PE): trailing SL moves upward only
+        if order_trigger < position.stop_loss - 1e-6:
+            _log.warning("SL_WATCHDOG_REPAIR_REQUIRED | symbol=%s | reason=SL_TRAILING_BEHIND order_trigger=%.2f current_sl=%.2f", symbol, order_trigger, position.stop_loss)
+            new_trigger = round(position.stop_loss, 2)
+            self._cancel_sl_order(symbol, position)
+            self._place_sl_m_order(symbol, position, new_trigger)
 
     def _reconcile_duplicate_sl(self, symbol: str, position: Position, current_sl_id: str) -> None:
         try:
             orders = self.kite.orders() or []
         except Exception:
             return
-        sl_txn = "SELL" if position.side == TradeSide.LONG else "BUY"
+        sl_txn = "SELL"  # exit for bought options
         active = ("OPEN", "TRIGGER PENDING", "AMO MODIFIED", "ACCEPTED", "OPEN PENDING")
         for o in orders:
             if o.get("tradingsymbol") != symbol:
@@ -1486,7 +1453,8 @@ class OrderManager:
         self._fire_market_exit(symbol, position, f"SL_RECOVERY_{reason}")
 
     def _fire_market_exit(self, symbol: str, position: Position, reason: str) -> None:
-        transaction_type = "SELL" if position.side == TradeSide.LONG else "BUY"
+        # Exit for bought options (CE or PE): sell to close
+        transaction_type = "SELL"
         ltp = self._get_ltp(symbol)
         if ltp is None or ltp <= 0:
             if position.stop_loss > 0:
@@ -1497,10 +1465,8 @@ class OrderManager:
                 _log.warning("FIRE_MARKET_ENTRY_FALLBACK | symbol=%s | no LTP or stop_loss, using entry=%.2f — PnL will be 0", symbol, ltp)
 
         buffer_pct = CONFIG.trade_mgmt.exit_limit_buffer_pct
-        limit_price = round(
-            ltp * (1 - buffer_pct) if position.side == TradeSide.LONG else ltp * (1 + buffer_pct),
-            2,
-        )
+        # Sell below LTP for fill
+        limit_price = round(ltp * (1 - buffer_pct), 2)
         _log.info(
             "ORDER_REQUEST | symbol=%s transaction_type=%s quantity=%d order_type=LIMIT price=%.2f trigger_price=None product=%s exchange=%s caller=_fire_limit_exit reason=%s",
             symbol, transaction_type, position.quantity, limit_price, CONFIG.capital.product_type, CONFIG.instrument.option_exchange, reason,
@@ -1609,7 +1575,8 @@ class OrderManager:
             _log.warning("Cannot send MARKET fallback for %s: cannot send exit", symbol)
             return
 
-        transaction_type = "SELL" if position.side == TradeSide.LONG else "BUY"
+        # Exit for bought options (CE or PE): sell to close
+        transaction_type = "SELL"
         ltp = self._get_ltp(symbol)
         if ltp is None or ltp <= 0:
             if position.stop_loss > 0:
@@ -1619,10 +1586,8 @@ class OrderManager:
                 ltp = position.effective_entry_price
                 _log.warning("MARKET_FALLBACK_ENTRY_FALLBACK | symbol=%s | no LTP or stop_loss, using entry=%.2f — PnL will be 0", symbol, ltp)
         buffer_pct = CONFIG.trade_mgmt.exit_limit_buffer_pct
-        limit_price = round(
-            ltp * (1 - buffer_pct) if position.side == TradeSide.LONG else ltp * (1 + buffer_pct),
-            2,
-        )
+        # Sell below LTP for fill
+        limit_price = round(ltp * (1 - buffer_pct), 2)
         order_kwargs = dict(
             tradingsymbol=symbol,
             exchange=CONFIG.instrument.option_exchange,

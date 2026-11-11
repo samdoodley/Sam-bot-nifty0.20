@@ -356,12 +356,10 @@ class TradingBot:
         premium_sl_distance = CONFIG.trade_mgmt.initial_sl_premium_points
         if premium_sl_distance <= 0:
             premium_sl_distance = delta_approx * sl_distance_index
-        if signal.side == TradeSide.LONG:
-            premium_sl = premium - premium_sl_distance
-            premium_target = premium + delta_approx * target_distance_index
-        else:
-            premium_sl = premium + premium_sl_distance
-            premium_target = premium - delta_approx * target_distance_index
+        # Both LONG (buy CE) and SHORT (buy PE) are option buys:
+        # profit when premium rises, loss when premium falls.
+        premium_sl = premium - premium_sl_distance
+        premium_target = premium + delta_approx * target_distance_index
         premium_sl = max(premium_sl, 0.05)
 
         self._active_symbol = contract.tradingsymbol
