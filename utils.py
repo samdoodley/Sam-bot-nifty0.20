@@ -227,6 +227,7 @@ class Position:
     exit_market_fallback_used: bool = False
     exit_fallback_quantity: int = 0
     entry_requested_at: Optional[str] = None
+    sl_breach_since: Optional[datetime] = None  # watchdog: time when LTP crossed SL and SL not filled
 
     @property
     def effective_entry_price(self) -> float:

@@ -235,7 +235,7 @@ class TradeManagementConfig:
     premium_stop_loss_points: float = 12.0
 
     sl_order_type: str = "SL"                # stop-loss limit for F&O (SL-M discontinued by exchange)
-    sl_limit_offset_points: float = 2.0         # limit price = trigger +/- this
+    sl_limit_offset_points: float = 0.0         # limit price = trigger +/- this (0 = trigger=limit, ~exact SL fill target)
     sl_escalation_watchdog_sec: float = 5.0     # if SL-limit unfilled in this
                                                    # window, fire market exit
 

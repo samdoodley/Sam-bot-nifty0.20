@@ -1323,6 +1323,43 @@ class OrderManager:
                 return
             self._guard_trailing_sl(symbol, position, sl_details)
 
+        # --- SL-L price/time-breach escalation (safety, no strategy change) ---
+        # With sl_limit_offset_points=0 (or in fast moves), SL-L can stay unfilled
+        # after trigger while LTP moves worse. If broker SL is not FILLED and LTP
+        # has crossed our stop level, escalate to emergency exit after a short window.
+        if position.stop_loss > 0 and ltp is not None and ltp > 0:
+            breached = ltp <= position.stop_loss  # bought option: loss when premium falls to/below SL
+            now = datetime.now()
+            if breached:
+                if position.sl_breach_since is None:
+                    position.sl_breach_since = now
+                    _log.warning(
+                        "SL_WATCHDOG_BREACH_DETECTED | symbol=%s | ltp=%.2f <= sl=%.2f | sl_status=%s | starting escalation timer",
+                        symbol, ltp, position.stop_loss, sl_status,
+                    )
+                elapsed = (now - position.sl_breach_since).total_seconds()
+                hard_buffer = 0.5  # pts beyond SL for immediate escalation in fast move
+                if elapsed >= CONFIG.trade_mgmt.sl_escalation_watchdog_sec or ltp <= (position.stop_loss - hard_buffer):
+                    reason = "SL_ESCALATION_TIMEOUT" if elapsed >= CONFIG.trade_mgmt.sl_escalation_watchdog_sec else "SL_ESCALATION_PRICE_BREACH"
+                    _log.warning(
+                        "SL_WATCHDOG_ESCALATION | symbol=%s | reason=%s | ltp=%.2f sl=%.2f elapsed=%.1fs sl_status=%s",
+                        symbol, reason, ltp, position.stop_loss, elapsed, sl_status,
+                    )
+                    # Clear breach timer and force emergency exit (reconciles before exit)
+                    position.sl_breach_since = None
+                    self._cancel_sl_and_market_exit(symbol, position, reason)
+                    return
+            else:
+                if position.sl_breach_since is not None:
+                    _log.info(
+                        "SL_WATCHDOG_BREACH_CLEARED | symbol=%s | ltp=%.2f > sl=%.2f",
+                        symbol, ltp, position.stop_loss,
+                    )
+                position.sl_breach_since = None
+        else:
+            # No reliable LTP; do not escalate on price, clear stale timer
+            position.sl_breach_since = None
+
         self._reconcile_duplicate_sl(symbol, position, sl_order_id)
 
         _log.info("SL_WATCHDOG_OK | symbol=%s | order_id=%s | status=%s", symbol, sl_order_id, sl_status)
