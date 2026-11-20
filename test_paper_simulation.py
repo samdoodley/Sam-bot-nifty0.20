@@ -356,7 +356,8 @@ class TestPaperOrderManagerIntegration(unittest.TestCase):
         )
         position.sl_order_id = sl_id
         self.get_ltp.return_value = 120.0
-        self.mgr._check_position_exit("TESTCE")
+        # Target exit is decided by the strategy layer, not the position monitor.
+        self.mgr._close_position("TESTCE", position, 120.0, "TARGET")
         self.assertEqual(position.state, PositionState.EXIT_LIMIT_PLACED)
         self.kite.process_paper_orders("TESTCE", 120.0)
         self.mgr._check_position_exit("TESTCE")

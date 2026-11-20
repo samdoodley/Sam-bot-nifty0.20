@@ -29,6 +29,7 @@ from trade_execution_logger import (
     log_sl_initiated,
     log_sl_modified,
     log_trade_error,
+    log_trail_update,
 )
 from trade_journal import record_trade
 from utils import OptionContract, Position, PositionState, TradeSide, TRAIL_TRIGGER_POINTS
@@ -48,6 +49,7 @@ class OrderManager:
         self.kite = kite
         self._get_ltp = get_ltp
         self._on_exit_callback: Optional[Callable[[str, ExitResult], None]] = None
+        self._on_entry_retry: Optional[Callable[[str, TradeSide], None]] = None
         self._positions: dict[str, Position] = {}
         self._sl_order_ids: dict[str, str] = {}
         self._entry_order_ids: dict[str, str] = {}
@@ -56,6 +58,9 @@ class OrderManager:
 
     def on_exit(self, callback: Callable[[str, ExitResult], None]) -> None:
         self._on_exit_callback = callback
+
+    def on_entry_retry(self, callback: Callable[[str, TradeSide], None]) -> None:
+        self._on_entry_retry = callback
 
     def open_position_count(self) -> int:
         with self._lock:
@@ -252,21 +257,53 @@ class OrderManager:
         # CONFIG.trade_mgmt.trailing_sl_ladder = [(profit_trigger, lock_profit), ...]
         # Both LONG (CE buy) and SHORT (PE buy) are option buys: trail SL upward
         if position.initial_sl > 0:
+            threshold = CONFIG.trade_mgmt.sl_trail_step_points
+            # Scaling ratchet: pick the HIGHEST satisfied rung whose SL level is still
+            # safely below LTP (placeable). A bigger jump reaches a higher rung and so
+            # locks more profit; if a higher rung's level is already at/above LTP (price
+            # gave back), we fall to the next lower placeable rung — never sending an
+            # invalid SELL-SL. Only move up (candidate must beat the last trigger).
             new_sl_trigger = None
             for trigger, lock in CONFIG.trade_mgmt.trailing_sl_ladder:
-                if profit >= trigger:
-                    new_sl_trigger = position.effective_entry_price + lock
-                else:
+                if profit < trigger:
                     break
+                candidate = position.effective_entry_price + lock
+                if candidate > position.last_sl_trigger + threshold and candidate <= (ltp - 0.05):
+                    new_sl_trigger = candidate  # keep the highest placeable rung met
 
             if new_sl_trigger is not None:
+                prev_lock = round(position.last_sl_trigger - position.effective_entry_price, 2)
+                new_lock = round(new_sl_trigger - position.effective_entry_price, 2)
+                # Classify this update: how many ladder rungs did profit cross above
+                # the last locked rung in this tick? >=2 means the price jumped across
+                # multiple rungs between samples (a "rung jump"), otherwise a normal step.
+                rungs_advanced = sum(
+                    1 for trig, lock in CONFIG.trade_mgmt.trailing_sl_ladder
+                    if profit >= trig and prev_lock < lock <= new_lock + 1e-9
+                )
+                kind = "RUNG_JUMP" if rungs_advanced >= 2 else "STEP"
+                _log.info(
+                    "TRAIL_UPDATE | symbol=%s | kind=%s | profit=%.2f | prev_lock=%.2f | new_lock=%.2f | rungs_advanced=%d",
+                    symbol, kind, profit, prev_lock, new_lock, rungs_advanced,
+                )
+                log_trail_update(
+                    symbol=symbol,
+                    side=position.side.value,
+                    quantity=position.quantity,
+                    kind=kind,
+                    profit=profit,
+                    prev_lock=prev_lock,
+                    new_lock=new_lock,
+                    rungs_advanced=rungs_advanced,
+                    new_sl_trigger=new_sl_trigger,
+                    sl_order_id=position.sl_order_id,
+                )
                 position.stop_loss = new_sl_trigger
                 position.trailing_sl_active = True
                 if position.sl_order_id:
-                    threshold = CONFIG.trade_mgmt.sl_m_slippage_points
-                    if new_sl_trigger > position.last_sl_trigger + threshold:
-                        self._cancel_sl_order(symbol, position)
-                        self._place_sl_m_order(symbol, position, new_sl_trigger)
+                    # Modify the live SL in place: no window without protection and
+                    # no risk of the broker rejecting a duplicate protective order.
+                    self._modify_sl_order(symbol, position)
 
         # SL touch: for bought options, exit when premium falls to stop_loss
         if ltp <= position.stop_loss:
@@ -352,6 +389,12 @@ class OrderManager:
                             # Release the cancelled, unfilled position so new entries can be placed
                             if symbol in self._positions:
                                 del self._positions[symbol]
+                            # Notify main bot to retry entry on next scan iteration
+                            if self._on_entry_retry is not None:
+                                try:
+                                    self._on_entry_retry(symbol, position.side)
+                                except Exception:
+                                    _log.exception("on_entry_retry callback failed for %s", symbol)
                     return
             except Exception:
                 pass
@@ -463,43 +506,37 @@ class OrderManager:
         sl_limit = sl_trigger - sl_offset  # sell below trigger for fill
         txn = "SELL"
 
-        order_type = CONFIG.trade_mgmt.sl_order_type
+        ltp = self._get_ltp(symbol)
+        if ltp is not None and ltp > 0 and round(sl_trigger, 2) >= ltp:
+            _log.warning(
+                "SL_TRIGGER_NOT_BELOW_LTP | symbol=%s | trigger=%.2f ltp=%.2f — stop already breached, firing market exit instead",
+                symbol, round(sl_trigger, 2), ltp,
+            )
+            self._fire_market_exit(symbol, position, "SL_TRIGGER_BREACHED_AT_PLACEMENT")
+            return
+
+        order_type = "SL"
 
         try:
-            if order_type == "SL-M":
-                _log.info(
-                    "ORDER_REQUEST | symbol=%s transaction_type=%s quantity=%d order_type=SL-M trigger_price=%.2f product=%s exchange=%s caller=_place_sl_order",
-                    symbol, txn, position.quantity, sl_trigger, CONFIG.capital.product_type, CONFIG.instrument.option_exchange,
-                )
-                sl_order_id = self.kite.place_order(
-                    tradingsymbol=symbol,
-                    exchange=CONFIG.instrument.option_exchange,
-                    transaction_type=txn,
-                    quantity=position.quantity,
-                    product=CONFIG.capital.product_type,
-                    order_type="SL-M",
-                    trigger_price=round(sl_trigger, 2),
-                )
-            else:
-                _log.info(
-                    "ORDER_REQUEST | symbol=%s transaction_type=%s quantity=%d order_type=SL price=%.2f trigger_price=%.2f product=%s exchange=%s caller=_place_sl_order",
-                    symbol, txn, position.quantity, sl_limit, sl_trigger, CONFIG.capital.product_type, CONFIG.instrument.option_exchange,
-                )
-                sl_order_id = self.kite.place_order(
-                    tradingsymbol=symbol,
-                    exchange=CONFIG.instrument.option_exchange,
-                    transaction_type=txn,
-                    quantity=position.quantity,
-                    product=CONFIG.capital.product_type,
-                    order_type="SL",
-                    price=round(sl_limit, 2),
-                    trigger_price=round(sl_trigger, 2),
-                )
+            _log.info(
+                "ORDER_REQUEST | symbol=%s transaction_type=%s quantity=%d order_type=SL price=%.2f trigger_price=%.2f product=%s exchange=%s caller=_place_sl_order",
+                symbol, txn, position.quantity, sl_limit, sl_trigger, CONFIG.capital.product_type, CONFIG.instrument.option_exchange,
+            )
+            sl_order_id = self.kite.place_order(
+                tradingsymbol=symbol,
+                exchange=CONFIG.instrument.option_exchange,
+                transaction_type=txn,
+                quantity=position.quantity,
+                product=CONFIG.capital.product_type,
+                order_type="SL",
+                price=round(sl_limit, 2),
+                trigger_price=round(sl_trigger, 2),
+            )
             with self._lock:
                 position.sl_order_id = sl_order_id
                 position.last_sl_trigger = round(sl_trigger, 2)
                 self._sl_order_ids[symbol] = sl_order_id
-            _log.info("SL_ORDER_SUBMITTED | symbol=%s | order_id=%s | trigger=%.2f | order_type=%s", symbol, sl_order_id, sl_trigger, order_type)
+            _log.info("SL_ORDER_SUBMITTED | symbol=%s | order_id=%s | trigger=%.2f | order_type=SL", symbol, sl_order_id, sl_trigger)
 
             log_sl_initiated(
                 symbol=symbol,
@@ -535,26 +572,20 @@ class OrderManager:
 
         sl_offset = CONFIG.trade_mgmt.sl_limit_offset_points
         new_trigger = round(position.stop_loss, 2)
-        new_limit = round(new_trigger + sl_offset, 2) if position.side == TradeSide.LONG else round(new_trigger - sl_offset, 2)
-
-        order_type = CONFIG.trade_mgmt.sl_order_type
-
-        if order_type == "SL-M":
-            self._cancel_sl_order(symbol, position)
-            self._place_sl_m_order(symbol, position, new_trigger)
-            return
+        # Bought options (CE or PE) exit with a SELL SL-Limit: limit below trigger.
+        new_limit = round(new_trigger - sl_offset, 2)
 
         try:
             _log.info(
-                "ORDER_REQUEST | symbol=%s transaction_type=%s quantity=%d order_type=SL price=%.2f trigger_price=%.2f product=%s exchange=%s caller=_modify_sl_order",
-                symbol, "SELL" if position.side == TradeSide.LONG else "BUY", position.quantity, new_limit, new_trigger, CONFIG.capital.product_type, CONFIG.instrument.option_exchange,
+                "ORDER_REQUEST | symbol=%s transaction_type=SELL quantity=%d order_type=SL price=%.2f trigger_price=%.2f product=%s exchange=%s caller=_modify_sl_order",
+                symbol, position.quantity, new_limit, new_trigger, CONFIG.capital.product_type, CONFIG.instrument.option_exchange,
             )
             self.kite.modify_order(
                 variety=CONFIG.kite.variety_regular,
                 order_id=position.sl_order_id,
                 tradingsymbol=symbol,
                 exchange=CONFIG.instrument.option_exchange,
-                transaction_type="SELL" if position.side == TradeSide.LONG else "BUY",
+                transaction_type="SELL",
                 quantity=position.quantity,
                 product=CONFIG.capital.product_type,
                 order_type="SL",
@@ -587,13 +618,31 @@ class OrderManager:
                 stop_loss=position.stop_loss,
             )
 
-    def _place_sl_m_order(self, symbol: str, position: Position, trigger_price: float) -> None:
-        """Place a SL-M order for trailing stop-loss (option buys: sell to exit)."""
+    def _place_sl_limit_order(self, symbol: str, position: Position, trigger_price: float) -> None:
+        """Place a SL-Limit stop-loss order for option buys (exit=SELL).
+
+        Zerodha has discontinued SL-M for F&O contracts, so we use SL with
+        limit = trigger - sl_limit_offset_points (0.0 => limit == trigger,
+        targeting an exact SL fill). Trailing/modification callers still
+        reference this name; it now routes through SL-Limit.
+        """
         transaction_type = "SELL"
+        sl_offset = CONFIG.trade_mgmt.sl_limit_offset_points
+        sl_limit = round(trigger_price - sl_offset, 2)
+
+        ltp = self._get_ltp(symbol)
+        if ltp is not None and ltp > 0 and round(trigger_price, 2) >= ltp:
+            _log.warning(
+                "SL_TRIGGER_NOT_BELOW_LTP | symbol=%s | trigger=%.2f ltp=%.2f — stop already breached, firing market exit instead",
+                symbol, round(trigger_price, 2), ltp,
+            )
+            self._fire_market_exit(symbol, position, "SL_TRIGGER_BREACHED_TRAIL")
+            return
+
         try:
             _log.info(
-                "ORDER_REQUEST | symbol=%s transaction_type=%s quantity=%d order_type=SL-M trigger_price=%.2f product=%s exchange=%s caller=_place_sl_m_order",
-                symbol, transaction_type, position.quantity, round(trigger_price, 2), CONFIG.capital.product_type, CONFIG.instrument.option_exchange,
+                "ORDER_REQUEST | symbol=%s transaction_type=%s quantity=%d order_type=SL price=%.2f trigger_price=%.2f product=%s exchange=%s caller=_place_sl_limit_order",
+                symbol, transaction_type, position.quantity, sl_limit, round(trigger_price, 2), CONFIG.capital.product_type, CONFIG.instrument.option_exchange,
             )
             sl_order_id = self.kite.place_order(
                 tradingsymbol=symbol,
@@ -601,16 +650,26 @@ class OrderManager:
                 transaction_type=transaction_type,
                 quantity=position.quantity,
                 product=CONFIG.capital.product_type,
-                order_type="SL-M",
+                order_type="SL",
+                price=round(sl_limit, 2),
                 trigger_price=round(trigger_price, 2),
             )
             with self._lock:
                 position.sl_order_id = sl_order_id
                 position.last_sl_trigger = round(trigger_price, 2)
-                self._sl_order_ids[symbol] = sl_order_id
-            _log.info("SL_M_ORDER_SUBMITTED | symbol=%s | order_id=%s | trigger=%.2f", symbol, sl_order_id, round(trigger_price, 2))
+            _log.info("SL_ORDER_SUBMITTED | symbol=%s | order_id=%s | trigger=%.2f | order_type=SL", symbol, sl_order_id, round(trigger_price, 2))
         except Exception:
-            _log.exception("Failed to place SL-M order for %s", symbol)
+            _log.exception("Failed to place SL order for %s", symbol)
+            log_trade_error(
+                symbol=symbol,
+                side=position.side.value,
+                quantity=position.quantity,
+                error="SL order placement failed",
+                stage="SL_INITIATED",
+                order_id=position.sl_order_id,
+                entry_price=position.entry_price,
+                stop_loss=position.stop_loss,
+            )
 
     def _cancel_sl_order(self, symbol: str, position: Position) -> None:
         sl_order_id = position.sl_order_id
@@ -1230,14 +1289,30 @@ class OrderManager:
             return False
         return True
 
+    def _is_paper_mode(self) -> bool:
+        return CONFIG.mode == TradingMode.PAPER
+
     def _check_sl_escalation_watchdog(self, symbol: str, position: Position) -> None:
         if position.state != PositionState.OPEN:
             return
 
         MAX_SL_REPAIR_RETRIES = 3
 
+        ltp = self._get_ltp(symbol)
+        stop = position.stop_loss
+        breached = stop > 0 and ltp is not None and ltp > 0 and ltp <= stop
+
         sl_order_id = position.sl_order_id
         if not sl_order_id:
+            # If price is already through the stop and there is no live SL order,
+            # repairing is pointless — close the position at market immediately.
+            if breached:
+                _log.warning(
+                    "SL_WATCHDOG_BREACH_NO_ORDER | symbol=%s | ltp=%.2f <= sl=%.2f — exiting immediately (no protective SL)",
+                    symbol, ltp, stop,
+                )
+                self._cancel_sl_and_market_exit(symbol, position, "SL_BREACHED_NO_ORDER")
+                return
             if position.sl_repair_count >= MAX_SL_REPAIR_RETRIES:
                 _log.warning("SL_WATCHDOG_MAX_RETRIES | symbol=%s | repairs=%d | firing market exit", symbol, position.sl_repair_count)
                 self._cancel_sl_and_market_exit(symbol, position, "SL_MAX_RETRIES_EXHAUSTED")
@@ -1256,7 +1331,6 @@ class OrderManager:
         if sl_status is None:
             sl_status = "UNKNOWN"
 
-        ltp = self._get_ltp(symbol) if self._get_ltp else None
         _log.info(
             "SL_WATCHDOG_CHECK | symbol=%s | position_qty=%d | sl_order_id=%s | sl_status=%s | sl_trigger=%.2f | current_price=%.2f",
             symbol, position.quantity, sl_order_id, sl_status, position.stop_loss, ltp or 0.0,
@@ -1286,6 +1360,10 @@ class OrderManager:
             return
 
         if sl_status in ("REJECTED",):
+            if breached:
+                _log.warning("SL_WATCHDOG_BREACH_REJECTED | symbol=%s | ltp=%.2f <= sl=%.2f — exiting immediately", symbol, ltp, stop)
+                self._cancel_sl_and_market_exit(symbol, position, "SL_BREACHED_REJECTED")
+                return
             if position.sl_repair_count >= MAX_SL_REPAIR_RETRIES:
                 _log.warning("SL_WATCHDOG_MAX_RETRIES | symbol=%s | repairs=%d | firing market exit", symbol, position.sl_repair_count)
                 self._cancel_sl_and_market_exit(symbol, position, "SL_MAX_RETRIES_EXHAUSTED")
@@ -1296,6 +1374,10 @@ class OrderManager:
             return
 
         if sl_status in ("UNKNOWN", "API_ERROR"):
+            if breached:
+                _log.warning("SL_WATCHDOG_BREACH_UNKNOWN | symbol=%s | ltp=%.2f <= sl=%.2f — exiting immediately", symbol, ltp, stop)
+                self._cancel_sl_and_market_exit(symbol, position, "SL_BREACHED_STATE_UNKNOWN")
+                return
             if position.sl_repair_count >= MAX_SL_REPAIR_RETRIES:
                 _log.warning("SL_WATCHDOG_MAX_RETRIES | symbol=%s | repairs=%d | firing market exit", symbol, position.sl_repair_count)
                 self._cancel_sl_and_market_exit(symbol, position, "SL_MAX_RETRIES_EXHAUSTED")
@@ -1306,6 +1388,10 @@ class OrderManager:
             return
 
         if sl_status in ("CANCELLED",):
+            if breached:
+                _log.warning("SL_WATCHDOG_BREACH_CANCELLED | symbol=%s | ltp=%.2f <= sl=%.2f — exiting immediately", symbol, ltp, stop)
+                self._cancel_sl_and_market_exit(symbol, position, "SL_BREACHED_CANCELLED")
+                return
             if position.sl_repair_count >= MAX_SL_REPAIR_RETRIES:
                 _log.warning("SL_WATCHDOG_MAX_RETRIES | symbol=%s | repairs=%d | firing market exit", symbol, position.sl_repair_count)
                 self._cancel_sl_and_market_exit(symbol, position, "SL_MAX_RETRIES_EXHAUSTED")
@@ -1414,10 +1500,20 @@ class OrderManager:
             return
         # Bought options (CE or PE): trailing SL moves upward only
         if order_trigger < position.stop_loss - 1e-6:
-            _log.warning("SL_WATCHDOG_REPAIR_REQUIRED | symbol=%s | reason=SL_TRAILING_BEHIND order_trigger=%.2f current_sl=%.2f", symbol, order_trigger, position.stop_loss)
             new_trigger = round(position.stop_loss, 2)
-            self._cancel_sl_order(symbol, position)
-            self._place_sl_m_order(symbol, position, new_trigger)
+            # A SELL-SL requires trigger < LTP. If the wanted trigger is already
+            # at/above price, do NOT cancel the existing (still valid) SL; leave it
+            # and let the escalation block in the caller exit the position cleanly,
+            # otherwise we would cancel protection and loop on rejected orders.
+            ltp = self._get_ltp(symbol) if self._get_ltp else None
+            if ltp is not None and ltp > 0 and new_trigger >= ltp:
+                _log.warning(
+                    "SL_TRAILING_SKIP_ABOVE_LTP | symbol=%s | wanted_trigger=%.2f ltp=%.2f — leaving existing SL, escalation will exit",
+                    symbol, new_trigger, ltp,
+                )
+                return
+            _log.warning("SL_WATCHDOG_REPAIR_REQUIRED | symbol=%s | reason=SL_TRAILING_BEHIND order_trigger=%.2f current_sl=%.2f", symbol, order_trigger, position.stop_loss)
+            self._modify_sl_order(symbol, position)
 
     def _reconcile_duplicate_sl(self, symbol: str, position: Position, current_sl_id: str) -> None:
         try:

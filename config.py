@@ -234,36 +234,33 @@ class TradeManagementConfig:
     premium_target_points: float = 15.0
     premium_stop_loss_points: float = 12.0
 
-    sl_order_type: str = "SL"                # stop-loss limit for F&O (SL-M discontinued by exchange)
-    sl_limit_offset_points: float = 0.0         # limit price = trigger +/- this (0 = trigger=limit, ~exact SL fill target)
+    # Stop-loss is ALWAYS an SL-Limit order (SL-M is discontinued for F&O on Zerodha).
+    sl_limit_offset_points: float = 0.0      # limit price = trigger - this (0.0 => limit == trigger)
     sl_escalation_watchdog_sec: float = 5.0     # if SL-limit unfilled in this
                                                    # window, fire market exit
 
-    exit_limit_buffer_pct: float = 0.02         # 2% aggressive buffer for LIMIT exit orders
+    exit_limit_buffer_pct: float = 0.005        # 0.5% tight buffer: if 2-pt SL is skipped, fallback exits ~3-4 pts
 
     profit_trail_pct: float = 0.7               # exit when profit reaches 70% of target distance
 
-    trail_start_points: float = 2.5             # start breakeven SL-M at this profit
+    trail_start_points: float = 2.5             # profit at which breakeven trailing begins
     trail_lock_points: float = 2.0              # lock 2.0 profit at this level
     trail_step_points: float = 2.0              # trail SL by 2 points per move (2-point gap)
     immediate_trail_lock_points: float = 0.0    # 0 = keep initial strategy SL until trailing engages (avoids premature exit before trailing starts)
-    use_sl_m_after_trail: bool = True           # use SL-M instead of SL-Limit after trail starts
-    sl_m_slippage_points: float = 0.5           # expected slippage on SL-M fills
+    # Minimum improvement (premium points) required before the SL-Limit is cancelled
+    # and re-placed while trailing. This is an SL-Limit step gate, NOT SL-M slippage.
+    sl_trail_step_points: float = 0.1
 
     # Configurable trailing SL ladder (premium points)
-    # List of (profit_trigger, lock_profit) tuples
-    # Example: [(1.5, 1.0), (2.0, 1.5), (2.5, 2.0), (3.0, 2.5), (3.5, 3.0), (4.0, 3.5), (4.5, 4.0), (5.0, 4.5), (5.5, 5.0), (6.0, 5.5)]
+    # List of (profit_trigger, lock_profit) tuples. Larger profit triggers lock a
+    # larger profit, so a fast rung-jump captures more (e.g. +3 → lock 2.0).
     trailing_sl_ladder: list = field(default_factory=lambda: [
         (1.5, 1.0),   # profit >= 1.5 → lock 1.0
-        (2.0, 1.5),   # profit >= 2.0 → lock 1.5
-        (2.5, 2.0),   # profit >= 2.5 → lock 2.0
-        (3.0, 2.5),   # profit >= 3.0 → lock 2.5
-        (3.5, 3.0),   # profit >= 3.5 → lock 3.0
-        (4.0, 3.5),   # profit >= 4.0 → lock 3.5
-        (4.5, 4.0),   # profit >= 4.5 → lock 4.0
-        (5.0, 4.5),   # profit >= 5.0 → lock 4.5
-        (5.5, 5.0),   # profit >= 5.5 → lock 5.0
-        (6.0, 5.5),   # profit >= 6.0 → lock 5.5
+        (3.0, 2.0),   # profit >= 3.0 → lock 2.0
+        (4.0, 2.5),   # profit >= 4.0 → lock 2.5
+        (5.0, 3.0),   # profit >= 5.0 → lock 3.0
+        (6.0, 4.0),   # profit >= 6.0 → lock 4.0
+        (7.0, 5.5),   # profit >= 7.0 → lock 5.5
     ])
 
     # Fixed SL/Target mode (overrides swing-based 1:2 RR)
@@ -282,10 +279,11 @@ class TradeManagementConfig:
 @dataclass(frozen=True)
 class PositionSizingConfig:
     risk_per_trade_pct_of_equity: float = 3.0   # % of account equity risked per trade
-    max_lots_per_trade: int = 1                  # hard ceiling: 1 lot for live testing
+    max_lots_per_trade: int = 1                  # hard ceiling: 1 lot for live trading
     fixed_quantity_lots: int = 1                 # force fixed 1 lot per trade
-    round_lots_down: bool = True                  # never round up quantity
-    use_fixed_quantity: bool = True               # use fixed 1 lot for every trade
+    round_lots_down: bool = True                 # never round up quantity
+    use_fixed_quantity: bool = True              # use fixed 1 lot for every trade
+    fixed_quantity_units: int = 17               # if > 0, force this exact quantity (overrides lot math) — paper testing
 
 
 # ============================================================
@@ -294,11 +292,11 @@ class PositionSizingConfig:
 
 @dataclass(frozen=True)
 class RiskConfig:
-    daily_loss_limit_pct_of_equity: float = 1.0
+    daily_loss_limit_pct_of_equity: float = 5.0
     daily_profit_target_pct_of_equity: float = 2.0
     stop_after_daily_loss_limit: bool = True
     stop_after_daily_profit_target: bool = False
-    max_daily_loss_rupees: float = 25000.0   # hard per-day loss limit (paper + live)
+    max_daily_loss_rupees: float = 15000.0   # hard per-day loss limit (paper + live)
 
 
 # ============================================================
@@ -314,7 +312,7 @@ class OrderConfig:
     max_order_retries: int = 3
     reject_retry_backoff_sec: float = 2.0
     exit_limit_timeout_sec: float = 3.0
-    entry_fill_timeout_sec: float = 120.0  # cancel unfilled LIMIT after ~120s and retry with fresh LIMIT
+    entry_fill_timeout_sec: float = 30.0   # cancel unfilled LIMIT after 30s and retry with fresh LIMIT
 
 
 # ============================================================

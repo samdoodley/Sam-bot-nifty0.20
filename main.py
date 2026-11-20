@@ -33,6 +33,7 @@ from datetime import datetime
 import dashboard
 import daily_report
 import indicators as ind
+import trade_tracking_dashboard
 from config import CONFIG, TradingMode
 from kite_api import KiteAPI
 from logger import get_logger, log_decision, send_telegram_alert
@@ -73,6 +74,7 @@ class TradingBot:
             self.kite.set_paper_equity(CONFIG.backtest.starting_equity)
         self.order_mgr = OrderManager(self.kite, get_ltp=self._get_option_ltp)
         self.order_mgr.on_exit(self._on_position_exit)
+        self.order_mgr.on_entry_retry(self._on_entry_retry)
 
         self.spot_token: int | None = None
         self._latest_option_ltp: dict[str, float] = {}
@@ -81,6 +83,9 @@ class TradingBot:
         self._last_daily_report_date: str | None = None
         self._last_session_save: float = 0.0
         self._margin_blocked: bool = False
+        self._entry_retry_pending: bool = False
+        self._entry_retry_symbol: str | None = None
+        self._entry_retry_signal = None
         self._adx_block_day: bool = False
         self._adx_checked_1230: bool = False
 
@@ -132,7 +137,6 @@ class TradingBot:
         import session_dashboard
         session_dashboard.start_session_dashboard()
 
-        import trade_tracking_dashboard
         trade_tracking_dashboard.start_trade_tracking_dashboard()
 
         signal.signal(signal.SIGINT, _handle_sigterm)
@@ -254,6 +258,14 @@ class TradingBot:
         if len(closed_5m) < 45:
             return
         latest_bar_ts = closed_5m[-1].ts
+
+        # If an entry was attempted but not filled, retry immediately on every
+        # scan iteration (5s) instead of waiting for the next closed candle.
+        if self._entry_retry_pending and latest_bar_ts != last_processed_bar_ts:
+            self._entry_retry_pending = False
+            self._retry_entry(closed_5m)
+            return
+
         if latest_bar_ts == last_processed_bar_ts:
             return  # already evaluated this closed candle
 
@@ -329,8 +341,11 @@ class TradingBot:
         return vals
 
     def _execute_signal(self, signal) -> None:
+        # Save signal for potential retry if entry order is not filled
+        self._entry_retry_signal = signal
         if not self._check_margin_safety():
             _log.warning("Entry blocked due to low margin")
+            self._entry_retry_signal = None
             return
 
         try:
@@ -370,6 +385,31 @@ class TradingBot:
         )
         self._subscribe_active_option(contract.instrument_token)
         send_telegram_alert("POSITION_OPEN", f"{contract.tradingsymbol} qty={sizing.quantity} side={signal.side.value}")
+
+    def _retry_entry(self, closed_5m) -> None:
+        """Retry a previously failed entry on every scan iteration (5s)."""
+        if self._entry_retry_signal is None:
+            return
+        signal = self._entry_retry_signal
+        self._entry_retry_signal = None
+        self._entry_retry_pending = False
+        # Re-evaluate strategy with fresh candles before re-entering
+        closed_15m = self.candles.get_closed_candles(self.spot_token, CONFIG.session.higher_timeframe_min)
+        if len(closed_15m) < 20:
+            _log.debug("ENTRY_RETRY_ABORT | reason=insufficient_15m_candles")
+            return
+        vwap_series = self._vwap_series_for(closed_5m)
+        fresh_signal = self.strategy.evaluate(closed_5m, closed_15m, vwap_series, symbol="NIFTY")
+        if fresh_signal.side not in (TradeSide.LONG, TradeSide.SHORT):
+            _log.info("ENTRY_RETRY_ABORT | reason=no_fresh_signal")
+            return
+        self._execute_signal(fresh_signal)
+
+    def _mark_entry_retry(self, symbol: str, signal) -> None:
+        """Called by order_manager when an entry order was not filled."""
+        self._entry_retry_pending = True
+        self._entry_retry_symbol = symbol
+        self._entry_retry_signal = signal
 
     def _estimate_margin_per_lot(self, contract, premium: float) -> float:
         # Buying options is fully paid (no leverage on the long premium side);
@@ -444,6 +484,14 @@ class TradingBot:
             position=None, current_pnl=0, index_points=0, **self._get_dashboard_pnl_fields(),
             trades_today=self.risk.stats.trades_taken, win_rate=round(self.risk.win_rate(), 1),
         )
+
+    def _on_entry_retry(self, symbol: str, side) -> None:
+        """Called by order_manager when an entry order was not filled.
+        Sets a flag so the next scan iteration retries the entry immediately
+        (every 5s) instead of waiting for the next closed candle."""
+        self._entry_retry_pending = True
+        self._entry_retry_symbol = symbol
+        _log.info("ENTRY_RETRY_PENDING | symbol=%s | will retry on next scan iteration", symbol)
 
     # ------------------------------------------------------------
     # KILL-SWITCH

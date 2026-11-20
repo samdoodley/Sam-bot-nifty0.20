@@ -243,8 +243,15 @@ class TestOrderManagerSafety(unittest.TestCase):
             position.exit_requested_at = past_time
 
         self.mgr._poll_exit_order_status(position.contract.tradingsymbol, position)
-        self.assertEqual(position.state, PositionState.EXIT_MARKET_FALLBACK)
+        # API timeout must not be treated as failure: we re-issue a marketable LIMIT
+        # (sell below LTP) instead of assuming the original exit failed outright.
+        self.assertEqual(position.state, PositionState.EXIT_LIMIT_PLACED)
         self.assertIsNotNone(position.exit_order_id)
+        self.assertEqual(self.kite.place_order.call_count, 2)
+        fallback_kwargs = self.kite.place_order.call_args.kwargs
+        self.assertEqual(fallback_kwargs["order_type"], "LIMIT")
+        self.assertEqual(fallback_kwargs["transaction_type"], "SELL")
+        self.assertEqual(fallback_kwargs["quantity"], 50)
 
     def test_tc09_bot_restart_reconcile_correctly(self):
         position = _make_position()
@@ -288,13 +295,14 @@ class TestOrderManagerSafety(unittest.TestCase):
         self.kite.place_order.assert_called_once()
 
     def test_tc11_sl_touch_cancels_sl_and_places_market_exit(self):
+        # Bought CE: SL touch when premium falls to/below stop_loss.
         position = Position(
             contract=_make_contract(),
-            side=TradeSide.SHORT,
+            side=TradeSide.LONG,
             entry_price=100.0,
             quantity=50,
-            stop_loss=110.0,
-            target=80.0,
+            stop_loss=90.0,
+            target=120.0,
             entry_time=datetime.now(),
             initial_sl=10.0,
             state=PositionState.OPEN,
@@ -305,10 +313,13 @@ class TestOrderManagerSafety(unittest.TestCase):
         with self.mgr._lock:
             self.mgr._positions[position.contract.tradingsymbol] = position
 
-        self.get_ltp.return_value = 112.0
+        self.get_ltp.return_value = 85.0
         self.kite.positions.return_value = {"net": [{"tradingsymbol": "TESTCE", "quantity": 50}]}
         self.kite.orders.return_value = [
             {"order_id": "sl123", "tradingsymbol": "TESTCE", "status": "TRIGGER PENDING"},
+        ]
+        self.kite.order_history.return_value = [
+            {"status": "TRIGGER PENDING", "filled_quantity": 0, "average_price": 0.0},
         ]
 
         self.mgr._check_position_exit(position.contract.tradingsymbol)
@@ -316,10 +327,11 @@ class TestOrderManagerSafety(unittest.TestCase):
         self.kite.cancel_order.assert_called_once_with(CONFIG.kite.variety_regular, "sl123")
         self.kite.place_order.assert_called_once()
         call_kwargs = self.kite.place_order.call_args[1]
-        self.assertEqual(call_kwargs["order_type"], "MARKET")
-        self.assertEqual(call_kwargs["transaction_type"], "BUY")
+        # Marketable LIMIT (sell below LTP) — no MARKET orders are used for exits
+        self.assertEqual(call_kwargs["order_type"], "LIMIT")
+        self.assertEqual(call_kwargs["transaction_type"], "SELL")
         self.assertEqual(call_kwargs["quantity"], 50)
-        self.assertEqual(position.state, PositionState.EXIT_MARKET_FALLBACK)
+        self.assertEqual(position.state, PositionState.EXIT_LIMIT_PLACED)
         self.assertIsNone(position.sl_order_id)
 
     def test_tc12_sl_touch_no_market_exit_if_already_closed(self):
@@ -451,7 +463,10 @@ class TestSLWatchdog(unittest.TestCase):
 
         self.kite.place_order.assert_called_once()
         call_kwargs = self.kite.place_order.call_args
-        self.assertEqual(call_kwargs.kwargs["order_type"], "MARKET")
+        # Rejected SL while price is healthy -> emergency exit via marketable LIMIT
+        self.assertEqual(call_kwargs.kwargs["order_type"], "LIMIT")
+        self.assertEqual(call_kwargs.kwargs["transaction_type"], "SELL")
+        # Mock reports the recovery exit as COMPLETE, so the position ends CLOSED.
         self.assertEqual(position.state, PositionState.CLOSED)
 
     def test_watchdog_repairs_on_sl_unexpectedly_cancelled(self):
@@ -772,12 +787,18 @@ class TestEntryStateFlow(unittest.TestCase):
 
         self.mgr._check_position_exit(position.contract.tradingsymbol)
 
-        self.assertTrue(position.stop_loss > 90.0)
+        # Entry 100, LTP 110 -> profit 10 -> highest ladder rung locks 5.5
+        self.assertAlmostEqual(position.stop_loss, 105.5, places=2)
         self.assertEqual(position.last_sl_trigger, round(position.stop_loss, 2))
+        # Trailing modifies the live SL in place (no unprotected window)
         self.kite.modify_order.assert_called_once()
-        call_kwargs = self.kite.modify_order.call_args
-        self.assertEqual(call_kwargs.kwargs["order_id"], "sl123")
-        self.assertEqual(call_kwargs.kwargs["trigger_price"], round(position.stop_loss, 2))
+        call_kwargs = self.kite.modify_order.call_args.kwargs
+        self.assertEqual(call_kwargs["order_id"], "sl123")
+        self.assertEqual(call_kwargs["order_type"], "SL")
+        self.assertEqual(call_kwargs["transaction_type"], "SELL")
+        self.assertEqual(call_kwargs["quantity"], 50)
+        self.assertAlmostEqual(call_kwargs["trigger_price"], 105.5, places=2)
+        self.assertAlmostEqual(call_kwargs["price"], 105.5, places=2)
         self.get_ltp.return_value = 100.0
 
     def test_trailing_sl_does_not_modify_when_profit_below_threshold(self):
@@ -805,7 +826,8 @@ class TestEntryStateFlow(unittest.TestCase):
 
     def test_trailing_sl_does_not_modify_when_already_at_new_trigger(self):
         position = _make_position(state=PositionState.OPEN, sl_placed_at=datetime.now().isoformat())
-        position.last_sl_trigger = 102.0
+        # Profit 10 -> highest rung locks 5.5 (entry 100 -> SL 105.5). Already there.
+        position.last_sl_trigger = 105.5
         with self.mgr._lock:
             self.mgr._positions[position.contract.tradingsymbol] = position
 
@@ -822,13 +844,14 @@ class TestEntryStateFlow(unittest.TestCase):
         self.get_ltp.return_value = 100.0
 
     def test_trailing_sl_short_moves_sl_to_entry_at_2pts(self):
+        # SHORT side means a bought PE: profit = ltp - entry (premium rising).
         position = _make_position(state=PositionState.OPEN, sl_placed_at=datetime.now().isoformat())
         position.side = TradeSide.SHORT
         position.entry_price = 35.25
-        position.stop_loss = 38.85
-        position.target = 28.05
-        position.initial_sl = 3.6
-        position.last_sl_trigger = 38.85
+        position.stop_loss = 33.25
+        position.target = 43.05
+        position.initial_sl = 2.0
+        position.last_sl_trigger = 33.25
         position.sl_order_id = "sl123"
         with self.mgr._lock:
             self.mgr._positions[position.contract.tradingsymbol] = position
@@ -836,23 +859,28 @@ class TestEntryStateFlow(unittest.TestCase):
         self.kite.order_history.return_value = [
             {"status": "TRIGGER PENDING", "filled_quantity": 0, "average_price": 0.0},
         ]
-        self.kite.positions.return_value = {"net": [{"tradingsymbol": "TESTCE", "quantity": -50}]}
+        self.kite.positions.return_value = {"net": [{"tradingsymbol": "TESTCE", "quantity": 50}]}
         self.kite.orders.return_value = []
-        self.get_ltp.return_value = 33.25  # profit = 2.0
+        self.get_ltp.return_value = 37.25  # profit = 2.0 -> rung (1.5, 1.0)
 
         self.mgr._check_position_exit(position.contract.tradingsymbol)
 
-        self.assertAlmostEqual(position.stop_loss, 35.25, places=2)
+        self.assertAlmostEqual(position.stop_loss, 36.25, places=2)  # entry + 1.0
         self.kite.modify_order.assert_called_once()
+        call_kwargs = self.kite.modify_order.call_args.kwargs
+        self.assertEqual(call_kwargs["order_type"], "SL")
+        self.assertEqual(call_kwargs["transaction_type"], "SELL")
+        self.assertAlmostEqual(call_kwargs["trigger_price"], 36.25, places=2)
 
     def test_trailing_sl_short_moves_sl_to_lock_2pts_at_3pts(self):
+        # SHORT side means a bought PE: profit = ltp - entry (premium rising).
         position = _make_position(state=PositionState.OPEN, sl_placed_at=datetime.now().isoformat())
         position.side = TradeSide.SHORT
         position.entry_price = 35.25
-        position.stop_loss = 35.25
-        position.target = 28.05
-        position.initial_sl = 3.6
-        position.last_sl_trigger = 35.25
+        position.stop_loss = 36.25
+        position.target = 43.05
+        position.initial_sl = 2.0
+        position.last_sl_trigger = 36.25
         position.sl_order_id = "sl123"
         with self.mgr._lock:
             self.mgr._positions[position.contract.tradingsymbol] = position
@@ -860,14 +888,17 @@ class TestEntryStateFlow(unittest.TestCase):
         self.kite.order_history.return_value = [
             {"status": "TRIGGER PENDING", "filled_quantity": 0, "average_price": 0.0},
         ]
-        self.kite.positions.return_value = {"net": [{"tradingsymbol": "TESTCE", "quantity": -50}]}
+        self.kite.positions.return_value = {"net": [{"tradingsymbol": "TESTCE", "quantity": 50}]}
         self.kite.orders.return_value = []
-        self.get_ltp.return_value = 32.25  # profit = 3.0
+        self.get_ltp.return_value = 38.25  # profit = 3.0 -> rung (3.0, 2.0)
 
         self.mgr._check_position_exit(position.contract.tradingsymbol)
 
-        self.assertAlmostEqual(position.stop_loss, 33.25, places=2)  # entry - 2 = 33.25
+        self.assertAlmostEqual(position.stop_loss, 37.25, places=2)  # entry + 2.0
         self.kite.modify_order.assert_called_once()
+        call_kwargs = self.kite.modify_order.call_args.kwargs
+        self.assertEqual(call_kwargs["order_type"], "SL")
+        self.assertAlmostEqual(call_kwargs["trigger_price"], 37.25, places=2)
 
     def test_trailing_sl_short_does_not_false_trigger(self):
         position = _make_position(state=PositionState.OPEN, sl_placed_at=datetime.now().isoformat())

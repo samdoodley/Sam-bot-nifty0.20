@@ -233,6 +233,42 @@ def log_sl_modified(
     )
 
 
+def log_trail_update(
+    symbol: str,
+    side: str,
+    quantity: int,
+    kind: str,
+    profit: float,
+    prev_lock: float,
+    new_lock: float,
+    rungs_advanced: int,
+    new_sl_trigger: float,
+    sl_order_id: str | None = None,
+    **extra: Any,
+) -> None:
+    """Record a trailing-SL move, classified as STEP (normal flow) or RUNG_JUMP
+    (price crossed >=2 ladder rungs in one monitor tick)."""
+    _write_record(
+        f"trade_execution_{_mode_suffix()}.jsonl",
+        {
+            "event": "TRAIL_UPDATE",
+            "symbol": symbol,
+            "side": side,
+            "quantity": quantity,
+            "kind": kind,
+            "profit": round(profit, 2),
+            "prev_lock": round(prev_lock, 2),
+            "new_lock": round(new_lock, 2),
+            "rungs_advanced": rungs_advanced,
+            "sl_trigger": round(new_sl_trigger, 2),
+            "new_trigger": round(new_sl_trigger, 2),
+            "sl_order_id": sl_order_id,
+            "reason": f"{kind} lock {new_lock:+.2f} (crossed {rungs_advanced})",
+            **extra,
+        },
+    )
+
+
 def log_position_closed(
     symbol: str,
     side: str,

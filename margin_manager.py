@@ -105,7 +105,12 @@ class MarginManager:
             return SizingResult(0, 0, 0.0, 0.0, available_margin, rejected_reason=reason)
 
         quantity = max_lots * lot_size
-        if CONFIG.sizing.round_lots_down:
+        fixed_units = int(getattr(CONFIG.sizing, "fixed_quantity_units", 0))
+        if fixed_units > 0:
+            # Explicit exact-quantity override (e.g. paper testing at 17 units),
+            # bypasses lot rounding entirely.
+            quantity = fixed_units
+        elif CONFIG.sizing.round_lots_down:
             quantity = round_down_to_lot(quantity, lot_size)
 
         result = SizingResult(

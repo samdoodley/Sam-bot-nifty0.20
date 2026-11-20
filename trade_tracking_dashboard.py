@@ -59,6 +59,8 @@ def _get_trade_data() -> dict[str, Any]:
     total_sl_initiated = sum(1 for e in events if e.get("event") == "SL_INITIATED")
     total_sl_filled = sum(1 for e in events if e.get("event") == "SL_FILLED")
     total_positions_closed = sum(1 for e in events if e.get("event") == "POSITION_CLOSED")
+    total_trail_updates = sum(1 for e in events if e.get("event") == "TRAIL_UPDATE")
+    total_trail_jumps = sum(1 for e in events if e.get("event") == "TRAIL_UPDATE" and e.get("kind") == "RUNG_JUMP")
     total_errors = len(errors)
 
     total_pnl = 0.0
@@ -89,6 +91,7 @@ def _get_trade_data() -> dict[str, Any]:
         order_id = e.get("order_id", e.get("sl_order_id", e.get("exit_order_id", "-")))
 
         pnl_color = "#37f26b" if isinstance(pnl, (int, float)) and pnl > 0 else ("#ff4444" if isinstance(pnl, (int, float)) and pnl < 0 else "#777")
+        kind = e.get("kind", "")
         event_color = {
             "ORDER_REQUESTED": "#7fdc9a",
             "ORDER_FILLED": "#37f26b",
@@ -97,8 +100,11 @@ def _get_trade_data() -> dict[str, Any]:
             "SL_FILLED": "#ff4444",
             "SL_CANCELLED": "#ffaa00",
             "SL_MODIFIED": "#aaffff",
+            "TRAIL_UPDATE": "#66ccff",
             "POSITION_CLOSED": "#37f26b",
         }.get(event, "#ffffff")
+        if event == "TRAIL_UPDATE" and kind == "RUNG_JUMP":
+            event_color = "#ffd24d"
 
         rows.append(f"""
         <tr>
@@ -165,6 +171,8 @@ tr:hover{{background:#122;}}
         <div class="summary-item"><div class="summary-label">Fills</div><div class="summary-value">{total_fills}</div></div>
         <div class="summary-item"><div class="summary-label">SL Initiated</div><div class="summary-value">{total_sl_initiated}</div></div>
         <div class="summary-item"><div class="summary-label">SL Filled</div><div class="summary-value">{total_sl_filled}</div></div>
+        <div class="summary-item"><div class="summary-label">Trail Steps</div><div class="summary-value">{total_trail_updates - total_trail_jumps}</div></div>
+        <div class="summary-item"><div class="summary-label">Rung Jumps</div><div class="summary-value">{total_trail_jumps}</div></div>
         <div class="summary-item"><div class="summary-label">Positions Closed</div><div class="summary-value">{total_positions_closed}</div></div>
         <div class="summary-item"><div class="summary-label">Wins</div><div class="summary-value positive">{wins}</div></div>
         <div class="summary-item"><div class="summary-label">Losses</div><div class="summary-value negative">{losses}</div></div>
